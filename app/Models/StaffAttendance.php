@@ -11,16 +11,17 @@ class StaffAttendance extends Model
 
     protected $table = 'staff_attendances';
 
-    protected $fillable = [
-        'staff_id',
-        'date',
-        'status',
-        'in_time',
-        'out_time',
-        'note',
-        'shift_name',
-        'leave',
-    ];
+   protected $fillable = [
+    'staff_id',
+    'branch_id',
+    'date',
+    'status',
+    'in_time',
+    'out_time',
+    'note',
+    'shift_name',
+    'leave',
+];
 
     protected $casts = [
         'leave' => 'boolean',

@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 class Subject extends Model
@@ -11,7 +12,16 @@ class Subject extends Model
         'name',
         'code',
         'full_mark',
+        'branch_id',
     ];
+
+    /**
+     * Subject belongs to a Branch.
+     */
+    public function branch(): BelongsTo
+    {
+        return $this->belongsTo(Branch::class);
+    }
 
     /**
      * একটি Subject অনেকগুলো Class-এর সাথে থাকতে পারে।
@@ -25,17 +35,19 @@ class Subject extends Model
             'class_id'
         );
     }
+
     public function resultSubjects()
-{
-    return $this->hasMany(ResultSubject::class);
-}
-public function classGroups(): BelongsToMany
-{
-    return $this->belongsToMany(
-        ClassGroup::class,
-        'group_subjects',
-        'subject_id',
-        'class_group_id'
-    );
-}
+    {
+        return $this->hasMany(ResultSubject::class);
+    }
+
+    public function classGroups(): BelongsToMany
+    {
+        return $this->belongsToMany(
+            ClassGroup::class,
+            'group_subjects',
+            'subject_id',
+            'class_group_id'
+        );
+    }
 }

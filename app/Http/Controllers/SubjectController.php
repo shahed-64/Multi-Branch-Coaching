@@ -9,11 +9,62 @@ use Illuminate\Validation\Rule;
 class SubjectController extends Controller
 {
     /**
+     * Academic Subject module access check.
+     *
+     * Manager            → All branches
+     * Branch Manager     → Own branch
+     * Admin              → Own branch
+     * Branch Admin       → Own branch
+     * Accountant         → No access
+     * Branch Accountant   → No access
+     */
+    private function authorizeAccess(Request $request)
+    {
+        $authUser = $request->user();
+
+        if (!$authUser) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthenticated.',
+            ], 401);
+        }
+
+        if (in_array($authUser->role, ['Accountant', 'Branch Accountant'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You are not authorized to access subjects.',
+            ], 403);
+        }
+
+        return null;
+    }
+
+    /**
      * Display a listing of subjects.
      */
-    public function index()
+    public function index(Request $request)
     {
-        $subjects = Subject::latest()->get();
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
+
+        $authUser = $request->user();
+
+        $query = Subject::with([
+            'branch',
+            'classes',
+            'classGroups',
+        ]);
+
+        // Manager can see all branches.
+        // Other academic users can see only their own branch.
+        if ($authUser->role !== 'Manager') {
+            $query->where('branch_id', $authUser->branch_id);
+        }
+
+        $subjects = $query
+            ->latest()
+            ->get();
 
         return response()->json([
             'success' => true,
@@ -34,44 +85,136 @@ class SubjectController extends Controller
      */
     public function store(Request $request)
     {
-        $validated = $request->validate([
-            'name' => ['required', 'string', 'max:255'],
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
 
+        $authUser = $request->user();
+
+        $request->validate([
+            'name' => [
+                'required',
+                'string',
+                'max:255',
+            ],
             'code' => [
                 'required',
                 'string',
                 'max:50',
-                'unique:subjects,code',
             ],
-
             'full_mark' => [
                 'required',
                 'numeric',
                 'min:1',
             ],
+            'branch_id' => [
+                'nullable',
+                'exists:branches,id',
+            ],
         ]);
 
+        /*
+        |--------------------------------------------------------------------------
+        | Determine Branch
+        |--------------------------------------------------------------------------
+        */
+
+        if ($authUser->role === 'Manager') {
+
+            if (!$request->branch_id) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Branch is required for Manager.',
+                ], 422);
+            }
+
+            $branchId = $request->branch_id;
+
+        } else {
+
+            if (!$authUser->branch_id) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Your account is not assigned to any branch.',
+                ], 422);
+            }
+
+            $branchId = $authUser->branch_id;
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Duplicate Code Check
+        |--------------------------------------------------------------------------
+        */
+
+        $code = strtoupper($request->code);
+
+        $exists = Subject::where('branch_id', $branchId)
+            ->where('code', $code)
+            ->exists();
+
+        if ($exists) {
+            return response()->json([
+                'success' => false,
+                'message' => 'This subject code already exists in the selected branch.',
+            ], 422);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Create Subject
+        |--------------------------------------------------------------------------
+        */
+
         $subject = Subject::create([
-            'name' => $validated['name'],
-            'code' => strtoupper($validated['code']),
-            'full_mark' => $validated['full_mark'],
+            'name' => $request->name,
+            'code' => $code,
+            'full_mark' => $request->full_mark,
+            'branch_id' => $branchId,
         ]);
 
         return response()->json([
             'success' => true,
             'message' => 'Subject created successfully.',
-            'data' => $subject,
+            'data' => $subject->load('branch'),
         ], 201);
     }
 
     /**
      * Display the specified subject.
      */
-    public function show(Subject $subject)
+    public function show(Request $request, Subject $subject)
     {
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
+
+        $authUser = $request->user();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Branch Access Check
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            $authUser->role !== 'Manager' &&
+            $subject->branch_id !== $authUser->branch_id
+        ) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Access denied.',
+            ], 403);
+        }
+
         return response()->json([
             'success' => true,
-            'data' => $subject,
+            'data' => $subject->load([
+                'branch',
+                'classes',
+                'classGroups',
+            ]),
         ]);
     }
 
@@ -86,19 +229,43 @@ class SubjectController extends Controller
     /**
      * Update the specified subject.
      */
-    public function update(Request $request, Subject $subject)
-    {
-        $validated = $request->validate([
-            'name' => ['required', 'string', 'max:255'],
+    public function update(
+        Request $request,
+        Subject $subject
+    ) {
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
 
+        $authUser = $request->user();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Branch Access Check
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            $authUser->role !== 'Manager' &&
+            $subject->branch_id !== $authUser->branch_id
+        ) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Access denied.',
+            ], 403);
+        }
+
+        $request->validate([
+            'name' => [
+                'required',
+                'string',
+                'max:255',
+            ],
             'code' => [
                 'required',
                 'string',
                 'max:50',
-                Rule::unique('subjects', 'code')
-                    ->ignore($subject->id),
             ],
-
             'full_mark' => [
                 'required',
                 'numeric',
@@ -106,24 +273,74 @@ class SubjectController extends Controller
             ],
         ]);
 
+        $code = strtoupper($request->code);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Duplicate Code Check
+        |--------------------------------------------------------------------------
+        */
+
+        $exists = Subject::where('branch_id', $subject->branch_id)
+            ->where('code', $code)
+            ->where('id', '!=', $subject->id)
+            ->exists();
+
+        if ($exists) {
+            return response()->json([
+                'success' => false,
+                'message' => 'This subject code already exists in this branch.',
+            ], 422);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Update Subject
+        |--------------------------------------------------------------------------
+        */
+
         $subject->update([
-            'name' => $validated['name'],
-            'code' => strtoupper($validated['code']),
-            'full_mark' => $validated['full_mark'],
+            'name' => $request->name,
+            'code' => $code,
+            'full_mark' => $request->full_mark,
         ]);
 
         return response()->json([
             'success' => true,
             'message' => 'Subject updated successfully.',
-            'data' => $subject->fresh(),
+            'data' => $subject->fresh()->load('branch'),
         ]);
     }
 
     /**
      * Remove the specified subject.
      */
-    public function destroy(Subject $subject)
-    {
+    public function destroy(
+        Request $request,
+        Subject $subject
+    ) {
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
+
+        $authUser = $request->user();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Branch Access Check
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            $authUser->role !== 'Manager' &&
+            $subject->branch_id !== $authUser->branch_id
+        ) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Access denied.',
+            ], 403);
+        }
+
         $subject->delete();
 
         return response()->json([

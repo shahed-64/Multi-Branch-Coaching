@@ -22,13 +22,13 @@ class Staff extends Authenticatable
         'image',
         'salary',
         'shift_id',
+        'branch_id',
     ];
 
     protected $hidden = [
         'password'
     ];
 
-    // Auto IMAGE GET
     protected $appends = ['image_url'];
 
     public function getImageUrlAttribute()
@@ -36,12 +36,17 @@ class Staff extends Authenticatable
         return $this->image ? asset('storage/' . $this->image) : null;
     }
 
-    // Shift Class
     public function shift()
     {
         return $this->belongsTo(Shift::class);
     }
-        public function attendances()
+
+    public function branch()
+    {
+        return $this->belongsTo(Branch::class);
+    }
+
+    public function attendances()
     {
         return $this->hasMany(TeachersAttendance::class);
     }

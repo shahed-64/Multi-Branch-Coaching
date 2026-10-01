@@ -15,6 +15,7 @@ class Result extends Model
         'student_id',
         'exam_year',
         'exam_type',
+        'branch_id',
     ];
 
     public function student(): BelongsTo
@@ -25,5 +26,10 @@ class Result extends Model
     public function resultSubjects(): HasMany
     {
         return $this->hasMany(ResultSubject::class);
+    }
+
+    public function branch(): BelongsTo
+    {
+        return $this->belongsTo(Branch::class);
     }
 }

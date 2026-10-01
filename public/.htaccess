@@ -5,6 +5,12 @@
 
     RewriteEngine On
 
+    # CORS Headers
+    <IfModule mod_headers.c>
+        SetEnvIf Origin "^http://localhost:5173$" AccessControlAllowOrigin=$0
+        Header always set Access-Control-Allow-Origin "%{AccessControlAllowOrigin}e" env=AccessControlAllowOrigin
+    </IfModule>
+
     # Handle Authorization Header
     RewriteCond %{HTTP:Authorization} .
     RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]

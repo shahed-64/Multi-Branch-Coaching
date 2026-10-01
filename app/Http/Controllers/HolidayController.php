@@ -7,15 +7,87 @@ use Illuminate\Http\Request;
 
 class HolidayController extends Controller
 {
-    public function index(Request $request)
+    /**
+     * Role Authorization
+     *
+     * Manager          → All branches
+     * Branch Manager   → Own branch
+     * Admin            → Own branch
+     * Branch Admin     → Own branch
+     * Accountant       → No access
+     * Branch Accountant → No access
+     */
+    private function authorizeAccess(Request $request)
     {
-        $query = Holiday::query();
+        $user = $request->user();
 
-        if ($request->has('year')) {
-            $query->whereYear('start_date', $request->year);
+        if (!$user) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthenticated.'
+            ], 401);
         }
 
-        $holidays = $query->orderBy('start_date', 'asc')->get();
+        if (in_array($user->role, [
+            'Accountant',
+            'Branch Accountant'
+        ])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You are not authorized to access holidays.'
+            ], 403);
+        }
+
+        return null;
+    }
+
+    /**
+     * Display a listing of holidays.
+     */
+    public function index(Request $request)
+    {
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
+
+        $user = $request->user();
+
+        $query = Holiday::query();
+
+        /**
+         * Branch Filter
+         *
+         * Manager → All branches
+         * Others  → Own branch
+         */
+        if ($user->role !== 'Manager') {
+
+            if (!$user->branch_id) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Your account is not assigned to any branch.'
+                ], 422);
+            }
+
+            $query->where(
+                'branch_id',
+                $user->branch_id
+            );
+        }
+
+        /**
+         * Year Filter
+         */
+        if ($request->has('year')) {
+            $query->whereYear(
+                'start_date',
+                $request->year
+            );
+        }
+
+        $holidays = $query
+            ->orderBy('start_date', 'asc')
+            ->get();
 
         return response()->json([
             'success' => true,
@@ -23,20 +95,79 @@ class HolidayController extends Controller
         ]);
     }
 
+    /**
+     * Store a newly created holiday.
+     */
     public function store(Request $request)
     {
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
+
+        $user = $request->user();
+
         $request->validate([
             'title' => 'required|string|max:255',
+
             'start_date' => 'required|date',
-            'end_date' => 'required|date|after_or_equal:start_date',
-            'description' => 'nullable|string'
+
+            'end_date' =>
+                'required|date|after_or_equal:start_date',
+
+            'description' =>
+                'nullable|string',
+
+            'branch_id' =>
+                'nullable|exists:branches,id',
         ]);
 
+        /**
+         * Branch Assignment
+         *
+         * Manager → Request থেকে branch_id নেবে
+         * Others  → নিজের branch_id automatically নেবে
+         */
+        if ($user->role === 'Manager') {
+
+            if (!$request->branch_id) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Please select a branch.'
+                ], 422);
+            }
+
+            $branchId = $request->branch_id;
+
+        } else {
+
+            if (!$user->branch_id) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Your account is not assigned to any branch.'
+                ], 422);
+            }
+
+            $branchId = $user->branch_id;
+        }
+
+        /**
+         * Create Holiday
+         */
         $holiday = Holiday::create([
-            'title' => $request->title,
-            'start_date' => $request->start_date,
-            'end_date' => $request->end_date,
-            'description' => $request->description,
+            'branch_id' =>
+                $branchId,
+
+            'title' =>
+                $request->title,
+
+            'start_date' =>
+                $request->start_date,
+
+            'end_date' =>
+                $request->end_date,
+
+            'description' =>
+                $request->description,
         ]);
 
         return response()->json([
@@ -46,8 +177,40 @@ class HolidayController extends Controller
         ], 201);
     }
 
-    public function destroy(Holiday $holiday)
-    {
+    /**
+     * Remove the specified holiday.
+     */
+    public function destroy(
+        Request $request,
+        Holiday $holiday
+    ) {
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
+
+        $user = $request->user();
+
+        /**
+         * Branch Access Check
+         *
+         * Manager → All branches
+         * Others  → Only own branch
+         */
+        if (
+            $user->role !== 'Manager' &&
+            (int) $holiday->branch_id !==
+            (int) $user->branch_id
+        ) {
+            return response()->json([
+                'success' => false,
+                'message' =>
+                    'Unauthorized access to this holiday.'
+            ], 403);
+        }
+
+        /**
+         * Delete
+         */
         $holiday->delete();
 
         return response()->json([

@@ -12,9 +12,15 @@ class Holiday extends Model
     protected $table = 'holidays';
 
     protected $fillable = [
+        'branch_id',
         'title',
         'start_date',
         'end_date',
         'description',
     ];
+
+    public function branch()
+    {
+        return $this->belongsTo(Branch::class);
+    }
 }

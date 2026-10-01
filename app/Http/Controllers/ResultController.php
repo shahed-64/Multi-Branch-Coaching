@@ -11,720 +11,447 @@ use App\Models\Subject;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\Rule;
-use Illuminate\Support\Facades\DB;
 
 class ResultController extends Controller
 {
-    /*
-    |--------------------------------------------------------------------------
-    | INDEX
-    |--------------------------------------------------------------------------
-    */
+    /**
+     * Result module access.
+     *
+     * Manager            → All branches
+     * Branch Manager     → Own branch
+     * Admin              → Own branch
+     * Branch Admin       → Own branch
+     * Accountant         → No access
+     * Branch Accountant  → No access
+     */
+    private function authorizeAccess(Request $request): ?JsonResponse
+    {
+        $user = $request->user();
 
-public function index(Request $request)
-{
-    /*
-    |--------------------------------------------------------------------------
-    | Result Pagination Settings
-    |--------------------------------------------------------------------------
-    */
+        if (!$user) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthenticated.',
+            ], 401);
+        }
 
-    $perPage = (int) $request->input('per_page', 10);
+        if (in_array($user->role, ['Branch Accountant', 'Accountant'])) {
+            return response()->json([
+                'status' => false,
+                'message' => 'You are not authorized to access results.',
+            ], 403);
+        }
 
-    // Minimum 1, Maximum 100
-    $perPage = min(max($perPage, 1), 100);
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | Student Search
-    |--------------------------------------------------------------------------
-    |
-    | Student ID অথবা Student Name দিয়ে search করা যাবে।
-    |
-    */
-
-    $studentSearch = trim(
-        $request->input('student_search', '')
-    );
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | Results Query
-    |--------------------------------------------------------------------------
-    |
-    | শুধুমাত্র Result server-side pagination হবে।
-    |
-    */
-
-    $results = Result::with([
-        'student.classInfo',
-        'student.classGroup',
-        'resultSubjects.subject'
-    ])
-        ->latest()
-        ->paginate(
-            $perPage,
-            ['*'],
-            'results_page'
-        );
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | Students Query
-    |--------------------------------------------------------------------------
-    |
-    | Result Insert-এর Student Select-এর জন্য
-    | Student table থেকে সব student load হবে।
-    |
-    */
-
-    $studentsQuery = Student::with([
-        'classInfo.subjects',
-        'classGroup.subjects'
-    ]);
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | Student ID / Name Search
-    |--------------------------------------------------------------------------
-    */
-
-    if ($studentSearch !== '') {
-
-        $studentsQuery->where(function ($query) use ($studentSearch) {
-
-            $query->where(
-                'student_id',
-                'like',
-                "%{$studentSearch}%"
-            )
-            ->orWhere(
-                'full_name',
-                'like',
-                "%{$studentSearch}%"
-            );
-        });
+        return null;
     }
 
+    /**
+     * Display results.
+     */
+    public function index(Request $request): JsonResponse
+    {
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
 
-    /*
-    |--------------------------------------------------------------------------
-    | Get All Students
-    |--------------------------------------------------------------------------
-    |
-    | এখানে কোনো pagination নেই।
-    | Student table-এর সব matching student আসবে।
-    |
-    */
+        $user = $request->user();
 
-    $students = $studentsQuery
-        ->orderBy('student_id', 'asc')
-        ->get();
+        $perPage = (int) $request->query('per_page', 20);
+        $perPage = max(1, min($perPage, 100));
 
-
-    /*
-    |--------------------------------------------------------------------------
-    | All Mapped Subject IDs
-    |--------------------------------------------------------------------------
-    */
-
-    $allMappedSubjectIds = GroupSubjectMapping::pluck('subject_id')
-        ->map(fn($id) => (int) $id)
-        ->unique()
-        ->values()
-        ->toArray();
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | All Additional Subject IDs
-    |--------------------------------------------------------------------------
-    */
-
-    $allAdditionalSubjectIds = DB::table('group_subjects')
-        ->pluck('subject_id')
-        ->map(fn($id) => (int) $id)
-        ->unique()
-        ->values()
-        ->toArray();
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | Calculate GPA For Current Result Page
-    |--------------------------------------------------------------------------
-    |
-    | এখানে শুধু current page-এর Result process হবে।
-    |
-    */
-
-    $results->getCollection()->each(function ($result) {
+        $studentSearch = $request->query('student_search');
 
         /*
         |--------------------------------------------------------------------------
-        | Examination Information
+        | Results Query
         |--------------------------------------------------------------------------
         */
 
-        $examination = Examination::where(
-            'examination_type',
-            $result->exam_type
-        )
-            ->where(
-                'examination_year',
-                $result->exam_year
-            )
-            ->first();
-
+        $resultsQuery = Result::with([
+            'student.classInfo',
+            'student.classGroup',
+            'resultSubjects.subject',
+        ]);
 
         /*
         |--------------------------------------------------------------------------
-        | Exam Mark
+        | Branch Isolation
         |--------------------------------------------------------------------------
         */
 
-        $examMark = $examination?->exam_mark;
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | GPA Variables
-        |--------------------------------------------------------------------------
-        */
-
-        $totalPoints = 0;
-        $subjectCount = 0;
-        $hasFailed = false;
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Calculate Subject GPA
-        |--------------------------------------------------------------------------
-        */
-
-        foreach ($result->resultSubjects as $resultSubject) {
-
-            $marks = $resultSubject->marks;
-
-
-            /*
-            |--------------------------------------------------------------------------
-            | No Marks
-            |--------------------------------------------------------------------------
-            */
-
-            if ($marks === null) {
-                continue;
-            }
-
-
-            /*
-            |--------------------------------------------------------------------------
-            | Full Mark
-            |--------------------------------------------------------------------------
-            |
-            | Examination-এর exam_mark থাকলে সেটি ব্যবহার হবে।
-            | না থাকলে Subject-এর full_mark ব্যবহার হবে।
-            |
-            */
-
-            $fullMark = $examMark !== null
-                ? (float) $examMark
-                : (float) (
-                    $resultSubject->subject?->full_mark ?? 100
-                );
-
-
-            /*
-            |--------------------------------------------------------------------------
-            | Invalid Full Mark
-            |--------------------------------------------------------------------------
-            */
-
-            if ($fullMark <= 0) {
-                continue;
-            }
-
-
-            /*
-            |--------------------------------------------------------------------------
-            | Convert Marks To Percentage
-            |--------------------------------------------------------------------------
-            */
-
-            $percentage = (
-                ((float) $marks / $fullMark) * 100
+        if ($user->role !== 'Manager') {
+            $resultsQuery->where(
+                'branch_id',
+                $user->branch_id
             );
+        }
 
+        /*
+        |--------------------------------------------------------------------------
+        | Student Search
+        |--------------------------------------------------------------------------
+        */
+
+        if ($studentSearch) {
+            $resultsQuery->whereHas(
+                'student',
+                function ($query) use ($studentSearch, $user) {
+
+                    $query->where(
+                        function ($q) use ($studentSearch) {
+                            $q->where(
+                                'full_name',
+                                'like',
+                                "%{$studentSearch}%"
+                            )
+                                ->orWhere(
+                                    'student_id',
+                                    'like',
+                                    "%{$studentSearch}%"
+                                );
+                        }
+                    );
+
+                    if ($user->role !== 'Manager') {
+                        $query->where(
+                            'branch_id',
+                            $user->branch_id
+                        );
+                    }
+                }
+            );
+        }
+
+        $results = $resultsQuery
+    ->latest()
+    ->paginate(
+        $perPage,
+        ['*'],
+        'results_page',
+        (int) $request->query('results_page', 1)
+    );
+
+        /*
+        |--------------------------------------------------------------------------
+        | Students
+        |--------------------------------------------------------------------------
+        */
+
+        $studentsQuery = Student::with([
+            'classInfo.subjects',
+            'classGroup.subjects',
+        ]);
+
+        if ($user->role !== 'Manager') {
+            $studentsQuery->where(
+                'branch_id',
+                $user->branch_id
+            );
+        }
+
+        if ($studentSearch) {
+            $studentsQuery->where(
+                function ($query) use ($studentSearch) {
+                    $query->where(
+                        'full_name',
+                        'like',
+                        "%{$studentSearch}%"
+                    )
+                        ->orWhere(
+                            'student_id',
+                            'like',
+                            "%{$studentSearch}%"
+                        );
+                }
+            );
+        }
+
+        $students = $studentsQuery->get();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Group Subject Mapping
+        |--------------------------------------------------------------------------
+        */
+
+        $allMappedSubjectIds = GroupSubjectMapping::query()
+            ->pluck('subject_id')
+            ->unique()
+            ->values()
+            ->toArray();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Additional Subjects
+        |--------------------------------------------------------------------------
+        */
+
+        $allAdditionalSubjectIds = [];
+
+        foreach ($students as $student) {
+
+            if (!$student->classGroup) {
+                continue;
+            }
+
+            foreach ($student->classGroup->subjects as $subject) {
+                $allAdditionalSubjectIds[] = $subject->id;
+            }
+        }
+
+        $allAdditionalSubjectIds = array_values(
+            array_unique($allAdditionalSubjectIds)
+        );
+
+        /*
+        |--------------------------------------------------------------------------
+        | Calculate GPA For Current Result Page
+        |--------------------------------------------------------------------------
+        */
+
+        foreach ($results->getCollection() as $result) {
+
+            $student = $result->student;
+
+            if (!$student) {
+                continue;
+            }
 
             /*
             |--------------------------------------------------------------------------
-            | Find Grading System
+            | Result Branch Integrity
             |--------------------------------------------------------------------------
             */
 
-            $grading = GradingSystem::where(
-                'min_percentage',
-                '<=',
-                $percentage
+            if (
+                (int) $result->branch_id !==
+                (int) $student->branch_id
+            ) {
+                $result->gpa = 0;
+                continue;
+            }
+
+            $examination = Examination::where(
+                'examination_type',
+                $result->exam_type
             )
-                ->orderByDesc('min_percentage')
+                ->where(
+                    'examination_year',
+                    $result->exam_year
+                )
+                ->where(
+                    'branch_id',
+                    $result->branch_id
+                )
                 ->first();
 
+            $totalPoint = 0;
+            $subjectCount = 0;
 
-            /*
-            |--------------------------------------------------------------------------
-            | Grade Not Found
-            |--------------------------------------------------------------------------
-            */
+            foreach ($result->resultSubjects as $resultSubject) {
 
-            if (!$grading) {
+                $subject = $resultSubject->subject;
 
-                $point = 0.00;
-                $hasFailed = true;
-
-            } else {
-
-                $point = (float) $grading->grade_point;
-
+                if (!$subject) {
+                    continue;
+                }
 
                 /*
                 |--------------------------------------------------------------------------
-                | Fail Grade
+                | Subject Branch Integrity
                 |--------------------------------------------------------------------------
                 */
 
-                if ($point == 0) {
-                    $hasFailed = true;
+                if (
+                    (int) $subject->branch_id !==
+                    (int) $result->branch_id
+                ) {
+                    continue;
                 }
+
+                $fullMark =
+                    $examination?->exam_mark
+                    ?? $subject->full_mark
+                    ?? 100;
+
+                if ((float) $fullMark <= 0) {
+                    continue;
+                }
+
+                $percentage =
+                    ((float) $resultSubject->marks / (float) $fullMark)
+                    * 100;
+
+                $grading = GradingSystem::where(
+                    'min_percentage',
+                    '<=',
+                    $percentage
+                )
+                    ->orderBy(
+                        'min_percentage',
+                        'desc'
+                    )
+                    ->first();
+
+                $point = $grading
+                    ? (float) $grading->grade_point
+                    : 0;
+
+                $totalPoint += $point;
+                $subjectCount++;
             }
 
+            $result->gpa = $subjectCount > 0
+                ? round($totalPoint / $subjectCount, 2)
+                : 0;
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Add Assigned Subjects To Students
+        |--------------------------------------------------------------------------
+        */
+
+        foreach ($students as $student) {
+
+            $subjects = collect();
 
             /*
             |--------------------------------------------------------------------------
-            | Add Point
+            | Class Subjects
             |--------------------------------------------------------------------------
             */
 
-            $totalPoints += $point;
-            $subjectCount++;
-        }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Calculate GPA
-        |--------------------------------------------------------------------------
-        */
-
-        $gpa = 0.00;
-
-        if (
-            $subjectCount > 0
-            && !$hasFailed
-        ) {
-
-            $gpa = $totalPoints / $subjectCount;
-
-            $gpa = min(5.00, $gpa);
-        }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Add Calculated GPA To Result
-        |--------------------------------------------------------------------------
-        */
-
-        $result->setAttribute(
-            'calculated_gpa',
-            number_format($gpa, 2)
-        );
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Add Status To Result
-        |--------------------------------------------------------------------------
-        */
-
-        $result->setAttribute(
-            'calculated_status',
-            $subjectCount > 0 && !$hasFailed
-                ? 'Pass'
-                : 'Fail'
-        );
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Add Exam Mark To Result
-        |--------------------------------------------------------------------------
-        */
-
-        $result->setAttribute(
-            'exam_mark',
-            $examMark !== null
-                ? (float) $examMark
-                : null
-        );
-    });
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | Student Subject Mapping
-    |--------------------------------------------------------------------------
-    |
-    | এখানে সব loaded student process হবে।
-    |
-    */
-
-    $students->each(function ($student) use (
-        $allMappedSubjectIds,
-        $allAdditionalSubjectIds
-    ) {
-
-        /*
-        |--------------------------------------------------------------------------
-        | Student Group
-        |--------------------------------------------------------------------------
-        */
-
-        $group = $student->classGroup;
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Group Name
-        |--------------------------------------------------------------------------
-        */
-
-        $student->setAttribute(
-            'group_name',
-            $group?->group_name
-        );
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Common Subjects
-        |--------------------------------------------------------------------------
-        */
-
-        if ($student->classInfo) {
-
-            $commonSubjects = $student->classInfo->subjects
-                ->filter(function ($subject) use (
-                    $allMappedSubjectIds,
-                    $allAdditionalSubjectIds
-                ) {
-
-                    $subjectId = (int) $subject->id;
-
-
-                    /*
-                    |--------------------------------------------------------------------------
-                    | Mapped Group Subject বাদ
-                    |--------------------------------------------------------------------------
-                    */
-
-                    if (
-                        in_array(
-                            $subjectId,
-                            $allMappedSubjectIds,
-                            true
-                        )
-                    ) {
-                        return false;
-                    }
-
-
-                    /*
-                    |--------------------------------------------------------------------------
-                    | Additional Subject বাদ
-                    |--------------------------------------------------------------------------
-                    */
-
-                    if (
-                        in_array(
-                            $subjectId,
-                            $allAdditionalSubjectIds,
-                            true
-                        )
-                    ) {
-                        return false;
-                    }
-
-
-                    return true;
-                })
-                ->values();
-
-        } else {
-
-            $commonSubjects = collect();
-        }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Set Common Subjects
-        |--------------------------------------------------------------------------
-        */
-
-        if ($student->classInfo) {
-
-            $student->classInfo->setRelation(
-                'subjects',
-                $commonSubjects
-            );
-        }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Additional / Group Subjects
-        |--------------------------------------------------------------------------
-        */
-
-        if ($group) {
-
-            $groupSubjects = $group->subjects
-                ->map(function ($subject) {
-
-                    return [
-                        'id' => $subject->id,
-                        'name' => $subject->name,
-                        'code' => $subject->code,
-                        'is_additional' => true,
-                        'full_mark' => $subject->full_mark,
-                    ];
-                })
-                ->values();
-
-        } else {
-
-            $groupSubjects = collect();
-        }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Set Group Subjects
-        |--------------------------------------------------------------------------
-        */
-
-        $student->setAttribute(
-            'group_subjects',
-            $groupSubjects
-        );
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Mapped Group Subjects
-        |--------------------------------------------------------------------------
-        */
-
-        if ($group) {
-
-            $mappedGroupSubjects =
-                GroupSubjectMapping::with('subject')
-                    ->where(
-                        'class_group_id',
-                        $group->id
-                    )
-                    ->get()
-                    ->map(function ($mapping) {
-
-                        return [
-                            'id' =>
-                                $mapping->subject?->id,
-
-                            'name' =>
-                                $mapping->subject?->name,
-
-                            'code' =>
-                                $mapping->subject?->code,
-
-                            'is_additional' =>
-                                false,
-
-                            'class_group_id' =>
-                                $mapping->class_group_id,
-
-                            'full_mark' =>
-                                $mapping->subject?->full_mark,
-                        ];
-                    })
-                    ->filter(function ($subject) {
-
-                        return !empty(
-                            $subject['id']
-                        );
-                    })
-                    ->values();
-
-        } else {
-
-            $mappedGroupSubjects = collect();
-        }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Remove Additional Subjects
-        | From Mapped Group Subjects
-        |--------------------------------------------------------------------------
-        */
-
-        $currentAdditionalSubjectIds =
-            $groupSubjects
-                ->pluck('id')
-                ->map(
-                    fn($id) => (int) $id
+            if ($student->classInfo) {
+                $subjects = $subjects->merge(
+                    $student->classInfo->subjects
+                );
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Group Subjects
+            |--------------------------------------------------------------------------
+            */
+
+            if ($student->classGroup) {
+                $subjects = $subjects->merge(
+                    $student->classGroup->subjects
+                );
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Group Subject Mapping
+            |--------------------------------------------------------------------------
+            */
+
+            if ($student->classGroup) {
+
+                $mappedSubjectIds = GroupSubjectMapping::where(
+                    'class_group_id',
+                    $student->classGroup->id
                 )
-                ->unique()
-                ->values()
-                ->toArray();
+                    ->pluck('subject_id');
 
+                if ($mappedSubjectIds->isNotEmpty()) {
 
-        $mappedGroupSubjects =
-            $mappedGroupSubjects
-                ->filter(function ($subject) use (
-                    $currentAdditionalSubjectIds
-                ) {
+                    $mappedSubjects = Subject::whereIn(
+                        'id',
+                        $mappedSubjectIds
+                    )
+                        ->where(
+                            'branch_id',
+                            $student->branch_id
+                        )
+                        ->get();
 
-                    return !in_array(
-                        (int) $subject['id'],
-                        $currentAdditionalSubjectIds,
-                        true
+                    $subjects = $subjects->merge(
+                        $mappedSubjects
                     );
-                })
+                }
+            }
+
+            $student->assigned_subjects = $subjects
+                ->unique('id')
                 ->values();
+        }
 
+        return response()->json([
+            'status' => true,
+            'results' => $results,
+            'students' => $students,
+            'pagination' => [
+                'current_page' =>
+                    $results->currentPage(),
 
-        /*
-        |--------------------------------------------------------------------------
-        | Set Mapped Group Subjects
-        |--------------------------------------------------------------------------
-        */
+                'last_page' =>
+                    $results->lastPage(),
 
-        $student->setAttribute(
-            'mapped_group_subjects',
-            $mappedGroupSubjects
-        );
-    });
+                'per_page' =>
+                    $results->perPage(),
 
+                'total' =>
+                    $results->total(),
+            ],
+            'total_students' =>
+                $students->count(),
+        ]);
+    }
 
-    /*
-    |--------------------------------------------------------------------------
-    | Response
-    |--------------------------------------------------------------------------
-    */
-
-    return response()->json([
-
-        'status' => true,
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Current Page Results
-        |--------------------------------------------------------------------------
-        */
-
-        'results' =>
-            $results->items(),
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | ALL Students
-        |--------------------------------------------------------------------------
-        */
-
-        'students' =>
-            $students->values(),
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | RESULT PAGINATION
-        |--------------------------------------------------------------------------
-        */
-
-        'results_pagination' => [
-
-            'current_page' =>
-                $results->currentPage(),
-
-            'last_page' =>
-                $results->lastPage(),
-
-            'per_page' =>
-                $results->perPage(),
-
-            'total' =>
-                $results->total(),
-
-            'from' =>
-                $results->firstItem(),
-
-            'to' =>
-                $results->lastItem(),
-        ],
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Total Students
-        |--------------------------------------------------------------------------
-        */
-
-        'total_students' =>
-            Student::count(),
-    ]);
-}
-    /*
-    |--------------------------------------------------------------------------
-    | STORE RESULT
-    |--------------------------------------------------------------------------
-    */
-
+    /**
+     * Store a new result.
+     */
     public function store(Request $request): JsonResponse
     {
-        $validated = $request->validate([
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
 
+        $user = $request->user();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Validation
+        |--------------------------------------------------------------------------
+        */
+
+        $validated = $request->validate([
             'student_id' => [
                 'required',
                 'exists:students,id',
-
-                Rule::unique('results')->where(function ($query) use ($request) {
-
-                    return $query
-                        ->where(
-                            'exam_year',
-                            $request->exam_year
-                        )
-                        ->where(
-                            'exam_type',
-                            $request->exam_type
-                        );
-                }),
+                Rule::unique('results')->where(
+                    function ($query) use ($request) {
+                        return $query
+                            ->where(
+                                'exam_year',
+                                $request->exam_year
+                            )
+                            ->where(
+                                'exam_type',
+                                $request->exam_type
+                            );
+                    }
+                ),
             ],
 
-            'exam_year' => 'required|string|max:255',
+            'exam_year' => [
+                'required',
+                'string',
+                'max:255',
+            ],
 
-            'exam_type' => 'required|string|max:255',
+            'exam_type' => [
+                'required',
+                'string',
+                'max:255',
+            ],
 
-            'subjects' => 'required|array|min:1',
+            'subjects' => [
+                'required',
+                'array',
+                'min:1',
+            ],
 
             'subjects.*.subject_id' => [
                 'required',
@@ -743,17 +470,6 @@ public function index(Request $request)
                 'nullable',
                 'boolean',
             ],
-
-        ], [
-
-            'student_id.unique' =>
-                'This student already has a result entered for this exam type and year!',
-
-            'subjects.required' =>
-                'At least one subject is required.',
-
-            'subjects.min' =>
-                'At least one subject is required.',
         ]);
 
         /*
@@ -764,14 +480,44 @@ public function index(Request $request)
 
         $student = Student::with([
             'classInfo.subjects',
-            'classGroup.subjects'
-        ])->findOrFail(
-            $validated['student_id']
-        );
+            'classGroup.subjects',
+        ])->find($validated['student_id']);
+
+        if (!$student) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Student not found.',
+            ], 404);
+        }
 
         /*
         |--------------------------------------------------------------------------
-        | Get Examination Settings
+        | Student Branch Isolation
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            $user->role !== 'Manager' &&
+            (int) $student->branch_id !==
+            (int) $user->branch_id
+        ) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthorized access to this student.',
+            ], 403);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Result Branch Always Comes From Student
+        |--------------------------------------------------------------------------
+        */
+
+        $resultBranchId = $student->branch_id;
+
+        /*
+        |--------------------------------------------------------------------------
+        | Get Examination
         |--------------------------------------------------------------------------
         */
 
@@ -783,9 +529,127 @@ public function index(Request $request)
                 'examination_year',
                 $validated['exam_year']
             )
+            ->where(
+                'branch_id',
+                $resultBranchId
+            )
             ->first();
 
-        $examMark = $examination?->exam_mark;
+        if (!$examination) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Examination not found for this branch.',
+            ], 422);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Build Assigned Subject IDs
+        |--------------------------------------------------------------------------
+        */
+
+        $assignedSubjectIds = collect();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Class Subjects
+        |--------------------------------------------------------------------------
+        */
+
+        if ($student->classInfo) {
+
+            $classSubjectIds =
+                $student->classInfo->subjects
+                    ->pluck('id');
+
+            $assignedSubjectIds =
+                $assignedSubjectIds->merge(
+                    $classSubjectIds
+                );
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Group Subjects
+        |--------------------------------------------------------------------------
+        */
+
+        if ($student->classGroup) {
+
+            $groupSubjectIds =
+                $student->classGroup->subjects
+                    ->pluck('id');
+
+            $assignedSubjectIds =
+                $assignedSubjectIds->merge(
+                    $groupSubjectIds
+                );
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Group Subject Mapping
+        |--------------------------------------------------------------------------
+        */
+
+        if ($student->classGroup) {
+
+            $mappedSubjectIds =
+                GroupSubjectMapping::where(
+                    'class_group_id',
+                    $student->classGroup->id
+                )
+                    ->pluck('subject_id');
+
+            $assignedSubjectIds =
+                $assignedSubjectIds->merge(
+                    $mappedSubjectIds
+                );
+        }
+
+        $assignedSubjectIds =
+            $assignedSubjectIds
+                ->unique()
+                ->values();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Explicit Subject Branch Validation
+        |--------------------------------------------------------------------------
+        |
+        | Every submitted subject must:
+        | 1. Exist
+        | 2. Belong to student's branch
+        | 3. Be assigned to this student
+        |
+        |--------------------------------------------------------------------------
+        */
+
+        $submittedSubjectIds = collect(
+            $validated['subjects']
+        )
+            ->pluck('subject_id')
+            ->unique()
+            ->values();
+
+        $invalidBranchSubjectExists = Subject::whereIn(
+            'id',
+            $submittedSubjectIds
+        )
+            ->where(
+                'branch_id',
+                '!=',
+                $resultBranchId
+            )
+            ->exists();
+
+        if ($invalidBranchSubjectExists) {
+            return response()->json([
+                'status' => false,
+                'message' =>
+                    'One or more selected subjects do not belong to the student branch.',
+            ], 422);
+        }
 
         /*
         |--------------------------------------------------------------------------
@@ -793,178 +657,185 @@ public function index(Request $request)
         |--------------------------------------------------------------------------
         */
 
-        $classSubjectIds = $student->classInfo
-            ? $student->classInfo->subjects
-                ->pluck('id')
-                ->map(fn($id) => (int) $id)
-                ->toArray()
-            : [];
+        foreach ($submittedSubjectIds as $subjectId) {
 
-        $group = $student->classGroup;
-
-        $groupSubjectIds = $group
-            ? $group->subjects
-                ->pluck('id')
-                ->map(fn($id) => (int) $id)
-                ->toArray()
-            : [];
-
-        $mappedGroupSubjectIds = $group
-            ? GroupSubjectMapping::where(
-                'class_group_id',
-                $group->id
-            )
-                ->pluck('subject_id')
-                ->map(fn($id) => (int) $id)
-                ->toArray()
-            : [];
-
-        $assignedSubjectIds = array_values(
-            array_unique(
-                array_merge(
-                    $classSubjectIds,
-                    $groupSubjectIds,
-                    $mappedGroupSubjectIds
-                )
-            )
-        );
-
-        /*
-        |--------------------------------------------------------------------------
-        | Validate Subjects And Maximum Marks
-        |--------------------------------------------------------------------------
-        */
-
-        foreach ($validated['subjects'] as $subjectData) {
-
-            $subjectId = (int) $subjectData['subject_id'];
-
-            if (!in_array(
-                $subjectId,
-                $assignedSubjectIds,
-                true
-            )) {
+            if (!$assignedSubjectIds->contains($subjectId)) {
 
                 return response()->json([
-                    'success' => false,
+                    'status' => false,
                     'message' =>
-                        'One or more selected subjects are not assigned to this student.'
-                ], 422);
-            }
-
-            $marks = $subjectData['marks'] ?? null;
-
-            if ($marks === null || $marks === '') {
-                continue;
-            }
-
-            /*
-            |--------------------------------------------------------------------------
-            | Determine Maximum Allowed Marks
-            |--------------------------------------------------------------------------
-            */
-
-            if ($examMark !== null) {
-
-                $maximumMarks = (float) $examMark;
-
-            } else {
-
-                $subject = Subject::find($subjectId);
-
-                $maximumMarks = (float) (
-                    $subject?->full_mark ?? 100
-                );
-            }
-
-            if ($maximumMarks <= 0) {
-
-                return response()->json([
-                    'success' => false,
-                    'message' =>
-                        'Invalid maximum marks configured for one of the selected subjects.'
-                ], 422);
-            }
-
-            if ((float) $marks > $maximumMarks) {
-
-                $subject = Subject::find($subjectId);
-
-                return response()->json([
-                    'success' => false,
-                    'message' =>
-                        "Marks for '{$subject?->name}' cannot be greater than {$maximumMarks}."
+                        "Subject ID {$subjectId} is not assigned to this student.",
                 ], 422);
             }
         }
 
         /*
         |--------------------------------------------------------------------------
-        | Store Result
+        | Validate Marks Against Examination Mark / Subject Full Mark
         |--------------------------------------------------------------------------
         */
 
-        $result = DB::transaction(function () use ($validated) {
+        foreach ($validated['subjects'] as $subjectData) {
 
-            $result = Result::create([
-                'student_id' =>
-                    $validated['student_id'],
+            $subject = Subject::where(
+                'id',
+                $subjectData['subject_id']
+            )
+                ->where(
+                    'branch_id',
+                    $resultBranchId
+                )
+                ->first();
 
-                'exam_year' =>
-                    $validated['exam_year'],
-
-                'exam_type' =>
-                    $validated['exam_type'],
-            ]);
-
-            foreach ($validated['subjects'] as $subjectData) {
-
-                $result->resultSubjects()->create([
-                    'subject_id' =>
-                        $subjectData['subject_id'],
-
-                    'marks' =>
-                        $subjectData['marks'] ?? null,
-                ]);
+            if (!$subject) {
+                return response()->json([
+                    'status' => false,
+                    'message' =>
+                        'Selected subject does not belong to the student branch.',
+                ], 422);
             }
 
-            return $result;
-        });
+            $fullMark =
+                $examination->exam_mark !== null
+                    ? (float) $examination->exam_mark
+                    : (float) ($subject->full_mark ?? 100);
+
+            $marks =
+                $subjectData['marks'] ?? null;
+
+            if (
+                $marks !== null &&
+                (float) $marks > $fullMark
+            ) {
+                return response()->json([
+                    'status' => false,
+                    'message' =>
+                        "Marks for {$subject->subject_name} cannot exceed {$fullMark}.",
+                ], 422);
+            }
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Create Result
+        |--------------------------------------------------------------------------
+        */
+
+        $result = Result::create([
+            'student_id' =>
+                $student->id,
+
+            'exam_year' =>
+                $validated['exam_year'],
+
+            'exam_type' =>
+                $validated['exam_type'],
+
+            'branch_id' =>
+                $resultBranchId,
+        ]);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Create Result Subjects
+        |--------------------------------------------------------------------------
+        */
+
+        foreach ($validated['subjects'] as $subjectData) {
+
+            $result->resultSubjects()->create([
+                'subject_id' =>
+                    $subjectData['subject_id'],
+
+                'marks' =>
+                    $subjectData['marks'] ?? null,
+            ]);
+        }
 
         $result->load([
             'student.classInfo',
             'student.classGroup',
-            'resultSubjects.subject'
+            'resultSubjects.subject',
         ]);
 
         return response()->json([
-            'success' => true,
-            'message' =>
-                'Result successfully stored!',
-
-            'data' =>
-                $result
-
+            'status' => true,
+            'message' => 'Result created successfully.',
+            'data' => $result,
         ], 201);
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | SHOW RESULT
-    |--------------------------------------------------------------------------
-    */
-
+    /**
+     * Display a specific result.
+     */
     public function show($id): JsonResponse
     {
-        $result = Result::with([
-            'student.classInfo',
-            'student.classGroup.subjects',
-            'resultSubjects.subject'
-        ])->findOrFail($id);
+        $request = request();
+
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
+
+        $user = $request->user();
 
         /*
         |--------------------------------------------------------------------------
-        | Get Examination Settings
+        | Load Result
+        |--------------------------------------------------------------------------
+        */
+
+        $result = Result::with([
+            'student.classInfo',
+            'student.classGroup.subjects',
+            'resultSubjects.subject',
+        ])->find($id);
+
+        if (!$result) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Result not found.',
+            ], 404);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Result Branch Isolation / IDOR
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            $user->role !== 'Manager' &&
+            (int) $result->branch_id !==
+            (int) $user->branch_id
+        ) {
+            return response()->json([
+                'status' => false,
+                'message' =>
+                    'Unauthorized access to this result.',
+            ], 403);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Student Branch Integrity
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            !$result->student ||
+            (int) $result->student->branch_id !==
+            (int) $result->branch_id
+        ) {
+            return response()->json([
+                'status' => false,
+                'message' =>
+                    'Result branch does not match student branch.',
+            ], 403);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Examination
         |--------------------------------------------------------------------------
         */
 
@@ -976,356 +847,257 @@ public function index(Request $request)
                 'examination_year',
                 $result->exam_year
             )
+            ->where(
+                'branch_id',
+                $result->branch_id
+            )
             ->first();
 
         /*
         |--------------------------------------------------------------------------
-        | Determine Effective Exam Mark
+        | Build Subjects
         |--------------------------------------------------------------------------
         */
 
-        $examMark = $examination?->exam_mark;
+        $subjects = [];
 
-        /*
-        |--------------------------------------------------------------------------
-        | Dynamic Grade Calculation
-        |--------------------------------------------------------------------------
-        */
+        $totalPoint = 0;
+        $subjectCount = 0;
 
-        $getGradeAndPoint = function (
-            $marks,
-            $fullMark = 100
-        ) {
+        foreach ($result->resultSubjects as $resultSubject) {
 
-            if ($marks === null) {
-                return null;
+            $subject = $resultSubject->subject;
+
+            if (!$subject) {
+                continue;
             }
 
-            $obtainedMarks = (float) $marks;
+            /*
+            |--------------------------------------------------------------------------
+            | Subject Branch Integrity
+            |--------------------------------------------------------------------------
+            */
 
-            $maximumMarks = (float) (
-                $fullMark ?: 100
-            );
-
-            if ($maximumMarks <= 0) {
-                return null;
+            if (
+                (int) $subject->branch_id !==
+                (int) $result->branch_id
+            ) {
+                continue;
             }
+
+            $fullMark =
+                $examination?->exam_mark
+                ?? $subject->full_mark
+                ?? 100;
+
+            if ((float) $fullMark <= 0) {
+                continue;
+            }
+
+            $marks =
+                $resultSubject->marks ?? 0;
 
             $percentage =
-                ($obtainedMarks / $maximumMarks) * 100;
+                ((float) $marks / (float) $fullMark) * 100;
 
             $grading = GradingSystem::where(
                 'min_percentage',
                 '<=',
                 $percentage
             )
-                ->orderByDesc('min_percentage')
+                ->orderBy(
+                    'min_percentage',
+                    'desc'
+                )
                 ->first();
 
-            if (!$grading) {
+            $grade =
+                $grading?->grade
+                ?? 'F';
 
-                return [
-                    'grade' => 'F',
-                    'point' => 0.00
-                ];
+            $point =
+                $grading
+                    ? (float) $grading->grade_point
+                    : 0;
+
+            $totalPoint += $point;
+            $subjectCount++;
+
+            $isAdditional = false;
+
+            if ($result->student?->classGroup) {
+
+                $isAdditional =
+                    $result->student
+                        ->classGroup
+                        ->subjects
+                        ->contains(
+                            'id',
+                            $subject->id
+                        );
             }
-
-            return [
-                'grade' => $grading->grade,
-                'point' => (float) $grading->grade_point
-            ];
-        };
-
-        /*
-        |--------------------------------------------------------------------------
-        | Subjects
-        |--------------------------------------------------------------------------
-        */
-
-        $subjects = [];
-
-        $totalPoints = 0;
-        $subjectCount = 0;
-        $hasFailed = false;
-
-        $student = $result->student;
-
-        $group = $student?->classGroup;
-
-        $groupSubjectIds = $group
-            ? $group->subjects
-                ->pluck('id')
-                ->map(fn($id) => (int) $id)
-                ->toArray()
-            : [];
-
-        foreach ($result->resultSubjects as $resultSubject) {
-
-            $marks = $resultSubject->marks;
-
-            if ($marks === null) {
-                continue;
-            }
-
-            /*
-            |--------------------------------------------------------------------------
-            | Determine Full Mark
-            |--------------------------------------------------------------------------
-            */
-
-            $fullMark = $examMark !== null
-                ? (float) $examMark
-                : (
-                    $resultSubject->subject?->full_mark
-                    ?? 100
-                );
-
-            /*
-            |--------------------------------------------------------------------------
-            | Calculate Dynamic Grade
-            |--------------------------------------------------------------------------
-            */
-
-            $gradePoint = $getGradeAndPoint(
-                $marks,
-                $fullMark
-            );
-
-            if ($gradePoint === null) {
-                continue;
-            }
-
-            /*
-            |--------------------------------------------------------------------------
-            | Check Additional Subject
-            |--------------------------------------------------------------------------
-            */
-
-            $isAdditional = in_array(
-                (int) $resultSubject->subject_id,
-                $groupSubjectIds
-            );
-
-            /*
-            |--------------------------------------------------------------------------
-            | Subject Response
-            |--------------------------------------------------------------------------
-            */
 
             $subjects[] = [
-
                 'id' =>
-                    $resultSubject->subject_id,
+                    $subject->id,
 
-                'subject_id' =>
-                    $resultSubject->subject_id,
-
-                'subject_name' =>
-                    $resultSubject->subject->name
+                'name' =>
+                    $subject->subject_name
+                    ?? $subject->name
                     ?? 'Unknown Subject',
 
-                'subject_code' =>
-                    $resultSubject->subject->code
-                    ?? null,
-
                 'marks' =>
-                    $marks,
+                    (float) $marks,
 
                 'full_mark' =>
-                    $fullMark,
+                    (float) $fullMark,
 
                 'percentage' =>
-                    round(
-                        ((float) $marks / $fullMark) * 100,
-                        2
-                    ),
+                    round($percentage, 2),
 
                 'grade' =>
-                    $gradePoint['grade'],
+                    $grade,
 
-                'point' =>
-                    number_format(
-                        $gradePoint['point'],
-                        2
-                    ),
+                'grade_point' =>
+                    $point,
 
                 'is_additional' =>
                     $isAdditional,
             ];
-
-            /*
-            |--------------------------------------------------------------------------
-            | GPA Calculation
-            |--------------------------------------------------------------------------
-            */
-
-            $totalPoints +=
-                $gradePoint['point'];
-
-            $subjectCount++;
-
-            if (
-                $gradePoint['point'] == 0
-            ) {
-                $hasFailed = true;
-            }
         }
 
         /*
         |--------------------------------------------------------------------------
-        | Final GPA
+        | GPA
         |--------------------------------------------------------------------------
         */
 
-        $finalGpa = 0.00;
+        $gpa = $subjectCount > 0
+            ? round(
+                $totalPoint / $subjectCount,
+                2
+            )
+            : 0;
 
-        if (
-            $subjectCount > 0
-            && !$hasFailed
-        ) {
-
-            $finalGpa =
-                $totalPoints / $subjectCount;
-
-            $finalGpa =
-                min(5.00, $finalGpa);
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Group Name
-        |--------------------------------------------------------------------------
-        */
-
-        $groupName =
-            $group?->group_name;
-
-        /*
-        |--------------------------------------------------------------------------
-        | Final Response
-        |--------------------------------------------------------------------------
-        */
+        $gpa = min(5, $gpa);
 
         return response()->json([
-
             'status' => true,
+            'data' => [
+                'id' =>
+                    $result->id,
 
-            'result' => [
+                'student' =>
+                    $result->student,
 
-                'student_name' =>
-                    $student->full_name
-                    ?? $student->name
-                    ?? '[STUDENT NAME]',
-
-                'father_name' =>
-                    $student->fathers_name
-                    ?? '[FATHER NAME]',
-
-                'mother_name' =>
-                    $student->mothers_name
-                    ?? '[MOTHER NAME]',
-
-                'institution_name' =>
-                    $student->institution_name
-                    ?? '[INSTITUTION NAME]',
-
-                'roll' =>
-                    $student->roll
-                    ?? $student->student_id
-                    ?? '[ROLL NO]',
-
-                'reg_no' =>
-                    $student->reg_no
-                    ?? '[REGISTRATION NO]',
-
-                'course_name' =>
-                    $student->course_name
-                    ?? null,
-
-                'group_name' =>
-                    $groupName,
-
-                'class_name' =>
-                    $student->classInfo->class_name
-                    ?? 'N/A',
-
-                'type' =>
-                    $result->exam_type
-                    ?? '[TYPE]',
-
-                'year' =>
+                'exam_year' =>
                     $result->exam_year,
 
-                'exam_mark' =>
-                    $examMark !== null
-                        ? (float) $examMark
-                        : null,
+                'exam_type' =>
+                    $result->exam_type,
 
-                'gpa' =>
-                    number_format(
-                        $finalGpa,
-                        2
-                    ),
+                'branch_id' =>
+                    $result->branch_id,
 
-                'gpa_without_additional' =>
-                    number_format(
-                        $finalGpa,
-                        2
-                    ),
-
-                'publication_date' =>
-                    $result->created_at
-                        ? $result->created_at
-                            ->format('d F Y')
-                        : null,
+                'examination' =>
+                    $examination,
 
                 'subjects' =>
                     $subjects,
 
-                'additional_subject' =>
-                    collect($subjects)
-                        ->where(
-                            'is_additional',
-                            true
-                        )
-                        ->values()
-                        ->all(),
-            ]
+                'gpa' =>
+                    $gpa,
+            ],
         ]);
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | EDIT
-    |--------------------------------------------------------------------------
-    */
-
+    /**
+     * Edit result.
+     *
+     * Currently not implemented.
+     */
     public function edit(Result $result)
     {
         //
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | UPDATE
-    |--------------------------------------------------------------------------
-    */
-
+    /**
+     * Update result.
+     *
+     * Currently not implemented.
+     */
     public function update(
         Request $request,
         Result $result
     ) {
-        //
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
+
+        $user = $request->user();
+
+        /*
+        |--------------------------------------------------------------------------
+        | IDOR Protection
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            $user->role !== 'Manager' &&
+            (int) $result->branch_id !==
+            (int) $user->branch_id
+        ) {
+            return response()->json([
+                'status' => false,
+                'message' =>
+                    'Unauthorized access to this result.',
+            ], 403);
+        }
+
+        return response()->json([
+            'status' => false,
+            'message' =>
+                'Result update is not implemented.',
+        ], 501);
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | DESTROY
-    |--------------------------------------------------------------------------
-    */
-
+    /**
+     * Delete result.
+     *
+     * Currently not implemented.
+     */
     public function destroy(Result $result)
     {
-        //
+        $request = request();
+
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
+
+        $user = $request->user();
+
+        /*
+        |--------------------------------------------------------------------------
+        | IDOR Protection
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            $user->role !== 'Manager' &&
+            (int) $result->branch_id !==
+            (int) $user->branch_id
+        ) {
+            return response()->json([
+                'status' => false,
+                'message' =>
+                    'Unauthorized access to this result.',
+            ], 403);
+        }
+
+        return response()->json([
+            'status' => false,
+            'message' =>
+                'Result deletion is not implemented.',
+        ], 501);
     }
 }

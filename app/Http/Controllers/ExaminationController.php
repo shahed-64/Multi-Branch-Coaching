@@ -8,15 +8,60 @@ use Illuminate\Http\Request;
 class ExaminationController extends Controller
 {
     /**
+     * Check Examination module access.
+     *
+     * Manager            → All branches
+     * Branch Manager     → Own branch
+     * Admin              → Own branch
+     * Branch Admin       → Own branch
+     * Accountant         → No access
+     * Branch Accountant  → No access
+     */
+    private function authorizeAccess(Request $request)
+    {
+        $user = $request->user();
+
+        if (!$user) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthenticated.',
+            ], 401);
+        }
+
+        if (in_array($user->role, ['Branch Accountant', 'Accountant'])) {
+            return response()->json([
+                'status' => false,
+                'message' => 'You are not authorized to access examinations.',
+            ], 403);
+        }
+
+        return null;
+    }
+
+    /**
      * Display a listing of the resource.
      */
-    public function index()
+    public function index(Request $request)
     {
-        $examination = Examination::orderBy('id', 'desc')->get();
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
+
+        $user = $request->user();
+
+        $query = Examination::orderBy('id', 'desc');
+
+        // Manager সব branch-এর examination দেখতে পারবে
+        // Branch Manager / Admin শুধু নিজের branch-এর examination দেখতে পারবে
+        if ($user->role !== 'Manager') {
+            $query->where('branch_id', $user->branch_id);
+        }
+
+        $examination = $query->get();
 
         return response()->json([
             'status' => true,
-            'data' => $examination
+            'data' => $examination,
         ]);
     }
 
@@ -25,7 +70,7 @@ class ExaminationController extends Controller
      */
     public function create()
     {
-        //
+        // API-এর ক্ষেত্রে প্রয়োজন নেই
     }
 
     /**
@@ -33,20 +78,67 @@ class ExaminationController extends Controller
      */
     public function store(Request $request)
     {
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
+
+        $user = $request->user();
+
         $request->validate([
             'examination_type' => 'required|string|max:255',
             'examination_year' => 'required|string|max:255',
             'exam_mark' => 'nullable|numeric|min:0',
+            'branch_id' => 'nullable|exists:branches,id',
         ]);
 
+        // Duplicate check branch-wise
+        $existsQuery = Examination::where(
+            'examination_type',
+            $request->examination_type
+        )
+            ->where(
+                'examination_year',
+                $request->examination_year
+            );
 
-        $exists = Examination::where('examination_type', $request->examination_type)
-            ->where('examination_year', $request->examination_year)
-            ->exists();
+        /*
+        |--------------------------------------------------------------------------
+        | Determine Branch
+        |--------------------------------------------------------------------------
+        */
 
-        if ($exists) {
+        if ($user->role === 'Manager') {
+
+            $branchId = $request->branch_id ?? $user->branch_id;
+
+            if (!$branchId) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Branch is required for Manager.',
+                ], 422);
+            }
+
+            $existsQuery->where('branch_id', $branchId);
+
+        } else {
+
+            // Branch Manager / Admin নিজের branch-এই create করবে
+
+            if (!$user->branch_id) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Your account is not assigned to any branch.',
+                ], 422);
+            }
+
+            $branchId = $user->branch_id;
+
+            $existsQuery->where('branch_id', $branchId);
+        }
+
+        if ($existsQuery->exists()) {
             return response()->json([
-                'message' => "{$request->examination_year} সালের জন্য '{$request->examination_type}' পরীক্ষাটি ইতিমধ্যে এন্ট্রি করা আছে!"
+                'message' => "{$request->examination_year} সালের জন্য '{$request->examination_type}' পরীক্ষাটি ইতিমধ্যে এই branch-এ এন্ট্রি করা আছে!",
             ], 422);
         }
 
@@ -54,23 +146,42 @@ class ExaminationController extends Controller
             'examination_type' => $request->examination_type,
             'examination_year' => $request->examination_year,
             'exam_mark' => $request->exam_mark,
+            'branch_id' => $branchId,
         ]);
 
         return response()->json([
             'status' => true,
             'message' => 'Examination Created Successfully!',
-            'exam' => $exam
+            'exam' => $exam,
         ]);
     }
 
     /**
      * Display the specified resource.
      */
-    public function show(Examination $examination)
+    public function show(Request $request, Examination $examination)
     {
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
+
+        $user = $request->user();
+
+        // Manager সব branch-এর examination দেখতে পারবে
+        // অন্যরা শুধু নিজের branch-এর examination দেখতে পারবে
+        if (
+            $user->role !== 'Manager' &&
+            $examination->branch_id != $user->branch_id
+        ) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthorized access to this examination.',
+            ], 403);
+        }
+
         return response()->json([
             'status' => true,
-            'data' => $examination
+            'data' => $examination,
         ]);
     }
 
@@ -79,29 +190,65 @@ class ExaminationController extends Controller
      */
     public function edit(Examination $examination)
     {
-        //
+        // API-এর ক্ষেত্রে প্রয়োজন নেই
     }
 
     /**
      * Update the specified resource in storage.
      */
-    public function update(Request $request, Examination $examination)
-    {
+    public function update(
+        Request $request,
+        Examination $examination
+    ) {
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
+
+        $user = $request->user();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Branch Access Check
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            $user->role !== 'Manager' &&
+            $examination->branch_id != $user->branch_id
+        ) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthorized access to this examination.',
+            ], 403);
+        }
+
         $request->validate([
             'examination_type' => 'required|string|max:255',
             'examination_year' => 'required|string|max:255',
             'exam_mark' => 'nullable|numeric|min:0',
         ]);
 
+        // Duplicate check branch-wise
+        $existsQuery = Examination::where(
+            'examination_type',
+            $request->examination_type
+        )
+            ->where(
+                'examination_year',
+                $request->examination_year
+            )
+            ->where('id', '!=', $examination->id);
 
-        $exists = Examination::where('examination_type', $request->examination_type)
-            ->where('examination_year', $request->examination_year)
-            ->where('id', '!=', $examination->id)
-            ->exists();
+        // Examination যে branch-এর,
+        // সেই branch-এই duplicate check হবে
+        $existsQuery->where(
+            'branch_id',
+            $examination->branch_id
+        );
 
-        if ($exists) {
+        if ($existsQuery->exists()) {
             return response()->json([
-                'message' => "{$request->examination_year} সালের জন্য '{$request->examination_type}' পরীক্ষাটি ইতিমধ্যে অন্য কোনো এন্ট্রিতে রয়েছে!"
+                'message' => "{$request->examination_year} সালের জন্য '{$request->examination_type}' পরীক্ষাটি ইতিমধ্যে এই branch-এ রয়েছে!",
             ], 422);
         }
 
@@ -114,20 +261,44 @@ class ExaminationController extends Controller
         return response()->json([
             'status' => true,
             'message' => 'Examination Updated Successfully!',
-            'exam' => $examination
+            'exam' => $examination,
         ]);
     }
 
     /**
      * Remove the specified resource from storage.
      */
-    public function destroy(Examination $examination)
-    {
+    public function destroy(
+        Request $request,
+        Examination $examination
+    ) {
+        if ($response = $this->authorizeAccess($request)) {
+            return $response;
+        }
+
+        $user = $request->user();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Branch Access Check
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            $user->role !== 'Manager' &&
+            $examination->branch_id != $user->branch_id
+        ) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthorized access to this examination.',
+            ], 403);
+        }
+
         $examination->delete();
 
         return response()->json([
             'status' => true,
-            'message' => 'Examination Deleted Successfully!'
+            'message' => 'Examination Deleted Successfully!',
         ]);
     }
 }

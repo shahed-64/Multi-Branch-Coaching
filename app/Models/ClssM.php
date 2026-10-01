@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use App\Models\Branch;
 
 class ClssM extends Model
 {
@@ -25,5 +26,10 @@ class ClssM extends Model
             'class_id',
             'subject_id'
         );
+    }
+
+    public function branch()
+    {
+        return $this->belongsTo(Branch::class);
     }
 }
