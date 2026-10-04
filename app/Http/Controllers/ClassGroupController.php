@@ -5,11 +5,38 @@ namespace App\Http\Controllers;
 use App\Models\ClassGroup;
 use App\Models\Subject;
 use App\Models\GroupSubjectMapping;
+use App\Services\BranchContext;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class ClassGroupController extends Controller
 {
+    /**
+     * Get current branch from BranchContext.
+     *
+     * null = Manager selected "All Branches"
+     */
+    private function currentBranchId(): ?int
+    {
+        return app(BranchContext::class)->id();
+    }
+
+    /**
+     * Class Group query according to current branch context.
+     */
+    private function classGroupQuery()
+    {
+        $query = ClassGroup::query();
+
+        $branchId = $this->currentBranchId();
+
+        if ($branchId !== null) {
+            $query->where('branch_id', $branchId);
+        }
+
+        return $query;
+    }
+
     /**
      * Class Group list
      */
@@ -25,24 +52,12 @@ class ClassGroupController extends Controller
             ], 403);
         }
 
-        $query = ClassGroup::with([
-            'subjects',
-            'groupSubjectMappings.subject',
-            'branch'
-        ]);
-
-        // Manager can see all branches
-        if ($authUser->role === 'Manager') {
-            // Optional branch filter for Manager
-            if ($request->filled('branch_id')) {
-                $query->where('branch_id', $request->branch_id);
-            }
-        } else {
-            // Branch Manager / Admin → own branch only
-            $query->where('branch_id', $authUser->branch_id);
-        }
-
-        $classGroups = $query
+        $classGroups = $this->classGroupQuery()
+            ->with([
+                'subjects',
+                'groupSubjectMappings.subject',
+                'branch'
+            ])
             ->orderBy('group_name')
             ->get();
 
@@ -76,30 +91,51 @@ class ClassGroupController extends Controller
             'branch_id' => 'nullable|integer|exists:branches,id',
         ]);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Branch Selection
-        |--------------------------------------------------------------------------
-        */
+        /**
+         * ----------------------------------------------------------
+         * Branch Selection
+         * ----------------------------------------------------------
+         *
+         * Selected branch from BranchContext is authoritative.
+         *
+         * Manager + All Branches:
+         * request branch_id is required.
+         *
+         * Other users:
+         * BranchContext contains their own branch.
+         */
+        $currentBranchId = $this->currentBranchId();
 
-        if ($authUser->role === 'Manager') {
-            // Manager can select branch
-            if (empty($validated['branch_id'])) {
-                $branchId = $authUser->branch_id;
-            } else {
-                $branchId = $validated['branch_id'];
-            }
+        if ($currentBranchId !== null) {
+
+            // Selected branch is authoritative.
+            $branchId = $currentBranchId;
+
         } else {
-            // Branch Manager / Admin → always own branch
-            $branchId = $authUser->branch_id;
+
+            // All Branches is only possible for Manager.
+            if (!$authUser || $authUser->role !== 'Manager') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Your account is not assigned to any branch.'
+                ], 422);
+            }
+
+            if (empty($validated['branch_id'])) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Branch is required for Manager.'
+                ], 422);
+            }
+
+            $branchId = $validated['branch_id'];
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Validate Subject Branch
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * ----------------------------------------------------------
+         * Validate Subject Branch
+         * ----------------------------------------------------------
+         */
         $subjectIds = $validated['subject_ids'] ?? [];
         $groupSubjectIds = $validated['group_subject_ids'] ?? [];
 
@@ -108,6 +144,7 @@ class ClassGroupController extends Controller
         );
 
         if (!empty($allSubjectIds)) {
+
             $invalidSubject = Subject::whereIn('id', $allSubjectIds)
                 ->where('branch_id', '!=', $branchId)
                 ->exists();
@@ -120,12 +157,11 @@ class ClassGroupController extends Controller
             }
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Duplicate Group Name Within Branch
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * ----------------------------------------------------------
+         * Duplicate Group Name Within Branch
+         * ----------------------------------------------------------
+         */
         $exists = ClassGroup::where('branch_id', $branchId)
             ->where('group_name', $validated['group_name'])
             ->exists();
@@ -141,35 +177,34 @@ class ClassGroupController extends Controller
 
         try {
 
-            /*
-            |--------------------------------------------------------------------------
-            | Create Class Group
-            |--------------------------------------------------------------------------
-            */
-
+            /**
+             * ----------------------------------------------------------
+             * Create Class Group
+             * ----------------------------------------------------------
+             */
             $classGroup = ClassGroup::create([
                 'group_name' => $validated['group_name'],
                 'branch_id' => $branchId,
             ]);
 
-            /*
-            |--------------------------------------------------------------------------
-            | Sync Normal Subjects
-            |--------------------------------------------------------------------------
-            */
-
+            /**
+             * ----------------------------------------------------------
+             * Sync Normal Subjects
+             * ----------------------------------------------------------
+             */
             if (!empty($subjectIds)) {
                 $classGroup->subjects()->sync($subjectIds);
             }
 
-            /*
-            |--------------------------------------------------------------------------
-            | Create Group Subject Mappings
-            |--------------------------------------------------------------------------
-            */
-
+            /**
+             * ----------------------------------------------------------
+             * Create Group Subject Mappings
+             * ----------------------------------------------------------
+             */
             if (!empty($groupSubjectIds)) {
+
                 foreach ($groupSubjectIds as $subjectId) {
+
                     GroupSubjectMapping::create([
                         'class_group_id' => $classGroup->id,
                         'subject_id' => $subjectId,
@@ -218,15 +253,16 @@ class ClassGroupController extends Controller
             ], 403);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Branch Isolation / IDOR Protection
-        |--------------------------------------------------------------------------
-        */
+        /**
+         * ----------------------------------------------------------
+         * Branch Isolation / IDOR Protection
+         * ----------------------------------------------------------
+         */
+        $currentBranchId = $this->currentBranchId();
 
         if (
-            $authUser->role !== 'Manager' &&
-            $classGroup->branch_id != $authUser->branch_id
+            $currentBranchId !== null &&
+            $classGroup->branch_id != $currentBranchId
         ) {
             return response()->json([
                 'success' => false,
@@ -263,15 +299,16 @@ class ClassGroupController extends Controller
             ], 403);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Branch Isolation / IDOR Protection
-        |--------------------------------------------------------------------------
-        */
+        /**
+         * ----------------------------------------------------------
+         * Branch Isolation / IDOR Protection
+         * ----------------------------------------------------------
+         */
+        $currentBranchId = $this->currentBranchId();
 
         if (
-            $authUser->role !== 'Manager' &&
-            $classGroup->branch_id != $authUser->branch_id
+            $currentBranchId !== null &&
+            $classGroup->branch_id != $currentBranchId
         ) {
             return response()->json([
                 'success' => false,
@@ -292,17 +329,17 @@ class ClassGroupController extends Controller
         $subjectIds = $validated['subject_ids'] ?? [];
         $groupSubjectIds = $validated['group_subject_ids'] ?? [];
 
-        /*
-        |--------------------------------------------------------------------------
-        | Validate Subject Branch
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * ----------------------------------------------------------
+         * Validate Subject Branch
+         * ----------------------------------------------------------
+         */
         $allSubjectIds = array_unique(
             array_merge($subjectIds, $groupSubjectIds)
         );
 
         if (!empty($allSubjectIds)) {
+
             $invalidSubject = Subject::whereIn('id', $allSubjectIds)
                 ->where('branch_id', '!=', $branchId)
                 ->exists();
@@ -315,12 +352,11 @@ class ClassGroupController extends Controller
             }
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Duplicate Group Name Within Branch
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * ----------------------------------------------------------
+         * Duplicate Group Name Within Branch
+         * ----------------------------------------------------------
+         */
         $exists = ClassGroup::where('branch_id', $branchId)
             ->where('group_name', $validated['group_name'])
             ->where('id', '!=', $classGroup->id)
@@ -337,43 +373,41 @@ class ClassGroupController extends Controller
 
         try {
 
-            /*
-            |--------------------------------------------------------------------------
-            | Update Group Name
-            |--------------------------------------------------------------------------
-            */
-
+            /**
+             * ----------------------------------------------------------
+             * Update Group Name
+             * ----------------------------------------------------------
+             */
             $classGroup->update([
                 'group_name' => $validated['group_name'],
             ]);
 
-            /*
-            |--------------------------------------------------------------------------
-            | Sync Normal Subjects
-            |--------------------------------------------------------------------------
-            */
-
+            /**
+             * ----------------------------------------------------------
+             * Sync Normal Subjects
+             * ----------------------------------------------------------
+             */
             $classGroup->subjects()->sync($subjectIds);
 
-            /*
-            |--------------------------------------------------------------------------
-            | Remove Existing Group Subject Mappings
-            |--------------------------------------------------------------------------
-            */
-
+            /**
+             * ----------------------------------------------------------
+             * Remove Existing Group Subject Mappings
+             * ----------------------------------------------------------
+             */
             GroupSubjectMapping::where(
                 'class_group_id',
                 $classGroup->id
             )->delete();
 
-            /*
-            |--------------------------------------------------------------------------
-            | Create New Group Subject Mappings
-            |--------------------------------------------------------------------------
-            */
-
+            /**
+             * ----------------------------------------------------------
+             * Create New Group Subject Mappings
+             * ----------------------------------------------------------
+             */
             if (!empty($groupSubjectIds)) {
+
                 foreach ($groupSubjectIds as $subjectId) {
+
                     GroupSubjectMapping::create([
                         'class_group_id' => $classGroup->id,
                         'subject_id' => $subjectId,
@@ -424,15 +458,16 @@ class ClassGroupController extends Controller
             ], 403);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Branch Isolation / IDOR Protection
-        |--------------------------------------------------------------------------
-        */
+        /**
+         * ----------------------------------------------------------
+         * Branch Isolation / IDOR Protection
+         * ----------------------------------------------------------
+         */
+        $currentBranchId = $this->currentBranchId();
 
         if (
-            $authUser->role !== 'Manager' &&
-            $classGroup->branch_id != $authUser->branch_id
+            $currentBranchId !== null &&
+            $classGroup->branch_id != $currentBranchId
         ) {
             return response()->json([
                 'success' => false,
@@ -444,31 +479,28 @@ class ClassGroupController extends Controller
 
         try {
 
-            /*
-            |--------------------------------------------------------------------------
-            | Delete Related Group Subject Mappings
-            |--------------------------------------------------------------------------
-            */
-
+            /**
+             * ----------------------------------------------------------
+             * Delete Related Group Subject Mappings
+             * ----------------------------------------------------------
+             */
             GroupSubjectMapping::where(
                 'class_group_id',
                 $classGroup->id
             )->delete();
 
-            /*
-            |--------------------------------------------------------------------------
-            | Detach Normal Subjects
-            |--------------------------------------------------------------------------
-            */
-
+            /**
+             * ----------------------------------------------------------
+             * Detach Normal Subjects
+             * ----------------------------------------------------------
+             */
             $classGroup->subjects()->detach();
 
-            /*
-            |--------------------------------------------------------------------------
-            | Delete Class Group
-            |--------------------------------------------------------------------------
-            */
-
+            /**
+             * ----------------------------------------------------------
+             * Delete Class Group
+             * ----------------------------------------------------------
+             */
             $classGroup->delete();
 
             DB::commit();
@@ -505,13 +537,27 @@ class ClassGroupController extends Controller
             ], 403);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Branch Selection
-        |--------------------------------------------------------------------------
-        */
+        /**
+         * ----------------------------------------------------------
+         * Branch Selection
+         * ----------------------------------------------------------
+         */
+        $currentBranchId = $this->currentBranchId();
 
-        if ($authUser->role === 'Manager') {
+        if ($currentBranchId !== null) {
+
+            // Selected branch is authoritative.
+            $branchId = $currentBranchId;
+
+        } else {
+
+            // Manager + All Branches
+            if (!$authUser || $authUser->role !== 'Manager') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Your account is not assigned to any branch.'
+                ], 422);
+            }
 
             if (!$request->filled('branch_id')) {
                 return response()->json([
@@ -521,11 +567,6 @@ class ClassGroupController extends Controller
             }
 
             $branchId = $request->branch_id;
-
-        } else {
-
-            // Branch Manager / Admin → own branch only
-            $branchId = $authUser->branch_id;
         }
 
         $subjects = Subject::where('branch_id', $branchId)

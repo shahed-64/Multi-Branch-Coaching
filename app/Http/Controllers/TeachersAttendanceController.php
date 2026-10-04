@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\TeachersAttendance;
 use App\Models\Teacher;
 use App\Models\Holiday;
+use App\Services\BranchContext;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
@@ -12,27 +13,89 @@ use Carbon\Carbon;
 class TeachersAttendanceController extends Controller
 {
     /**
+     * --------------------------------------------------------------------------
+     * Get current branch from central BranchContext.
+     * --------------------------------------------------------------------------
+     */
+    private function currentBranchId(): ?int
+    {
+        return app(BranchContext::class)->id();
+    }
+
+    /**
+     * --------------------------------------------------------------------------
+     * Check whether attendance belongs to current branch context.
+     * --------------------------------------------------------------------------
+     */
+    private function attendanceQuery()
+    {
+        $query = TeachersAttendance::query();
+
+        $currentBranchId = $this->currentBranchId();
+
+        /**
+         * All Branches => no branch filter.
+         *
+         * Selected branch / non-manager => current branch only.
+         */
+        if ($currentBranchId !== null) {
+            $query->where(
+                'branch_id',
+                $currentBranchId
+            );
+        }
+
+        return $query;
+    }
+
+    /**
+     * --------------------------------------------------------------------------
+     * Check whether teacher belongs to current branch context.
+     * --------------------------------------------------------------------------
+     */
+    private function teacherQuery()
+    {
+        $query = Teacher::query();
+
+        $currentBranchId = $this->currentBranchId();
+
+        /**
+         * All Branches => all teachers.
+         *
+         * Selected branch / non-manager => current branch only.
+         */
+        if ($currentBranchId !== null) {
+            $query->where(
+                'branch_id',
+                $currentBranchId
+            );
+        }
+
+        return $query;
+    }
+
+    /**
+     * --------------------------------------------------------------------------
      * Display attendance list.
-     *
-     * Manager = সব branch
-     * Admin / Accountant = নিজের branch
+     * --------------------------------------------------------------------------
      */
     public function index(Request $request)
     {
         $authUser = $request->user();
 
-        $query = TeachersAttendance::with('teacher');
-
-        // Branch Isolation
-        if ($authUser && $authUser->role !== 'Manager') {
-            $query->where('branch_id', $authUser->branch_id);
-        }
+        $query = $this->attendanceQuery()
+            ->with('teacher');
 
         if ($request->has('date')) {
-            $query->where('date', $request->date);
+            $query->where(
+                'date',
+                $request->date
+            );
         }
 
-        // মাস অনুযায়ী filter
+        /**
+         * মাস অনুযায়ী filter
+         */
         if ($request->has('month')) {
             $query->whereYear(
                 'date',
@@ -44,7 +107,10 @@ class TeachersAttendanceController extends Controller
         }
 
         if ($request->has('shift_name')) {
-            $query->where('shift_name', $request->shift_name);
+            $query->where(
+                'shift_name',
+                $request->shift_name
+            );
         }
 
         $attendances = $query
@@ -53,41 +119,44 @@ class TeachersAttendanceController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $attendances
+            'data' => $attendances,
         ]);
     }
 
-
     /**
+     * --------------------------------------------------------------------------
      * Store / Update multiple teacher attendance.
+     * --------------------------------------------------------------------------
      */
     public function store(Request $request)
     {
         $request->validate([
-            'date' => 'required|date',
+            'date' =>
+                'required|date',
 
-            'attendances' => 'required|array',
+            'attendances' =>
+                'required|array',
 
-            'attendances.*.teacher_id'
-                => 'required|exists:teachers,id',
+            'attendances.*.teacher_id' =>
+                'required|exists:teachers,id',
 
-            'attendances.*.shift_name'
-                => 'nullable|string',
+            'attendances.*.shift_name' =>
+                'nullable|string',
 
-            'attendances.*.status'
-                => 'nullable|in:Present,Absent,Late,Leave,Off Day',
+            'attendances.*.status' =>
+                'nullable|in:Present,Absent,Late,Leave,Off Day',
 
-            'attendances.*.leave'
-                => 'nullable|boolean',
+            'attendances.*.leave' =>
+                'nullable|boolean',
 
-            'attendances.*.in_time'
-                => 'nullable',
+            'attendances.*.in_time' =>
+                'nullable',
 
-            'attendances.*.out_time'
-                => 'nullable',
+            'attendances.*.out_time' =>
+                'nullable',
 
-            'attendances.*.note'
-                => 'nullable|string|max:255',
+            'attendances.*.note' =>
+                'nullable|string|max:255',
         ]);
 
         $authUser = $request->user();
@@ -95,304 +164,260 @@ class TeachersAttendanceController extends Controller
         DB::beginTransaction();
 
         try {
-
             $date = $request->date;
 
             $savedAttendances = [];
 
-            /*
-            |--------------------------------------------------------------------------
-            | Holiday Check
-            |--------------------------------------------------------------------------
-            */
-
-            $isHoliday = Holiday::where('start_date', '<=', $date)
-                ->where('end_date', '>=', $date)
+            /**
+             * ------------------------------------------------------------------
+             * Holiday Check
+             * ------------------------------------------------------------------
+             */
+            $isHoliday = Holiday::where(
+                'start_date',
+                '<=',
+                $date
+            )
+                ->where(
+                    'end_date',
+                    '>=',
+                    $date
+                )
                 ->exists();
 
-
-            /*
-            |--------------------------------------------------------------------------
-            | Save Attendance
-            |--------------------------------------------------------------------------
-            */
-
+            /**
+             * ------------------------------------------------------------------
+             * Save Attendance
+             * ------------------------------------------------------------------
+             */
             foreach ($request->attendances as $item) {
 
-                /*
-                |--------------------------------------------------------------------------
-                | Teacher খুঁজে বের করা
-                |--------------------------------------------------------------------------
-                */
+                /**
+                 * --------------------------------------------------------------
+                 * Teacher খুঁজে বের করা
+                 * --------------------------------------------------------------
+                 *
+                 * Current BranchContext অনুযায়ী teacher খোঁজা হবে।
+                 */
+                $teacherQuery = $this->teacherQuery();
 
-                $teacherQuery = Teacher::query();
+                $teacher = $teacherQuery->find(
+                    $item['teacher_id']
+                );
 
-                // Non-manager নিজের branch-এর teacher-ই পাবে
-                if ($authUser && $authUser->role !== 'Manager') {
-
-                    $teacherQuery->where(
-                        'branch_id',
-                        $authUser->branch_id
-                    );
-                }
-
-                $teacher = $teacherQuery->find($item['teacher_id']);
-
-                /*
-                |--------------------------------------------------------------------------
-                | অন্য branch-এর teacher হলে block
-                |--------------------------------------------------------------------------
-                */
-
+                /**
+                 * --------------------------------------------------------------
+                 * অন্য branch-এর teacher হলে block
+                 * --------------------------------------------------------------
+                 */
                 if (!$teacher) {
-
                     DB::rollBack();
 
                     return response()->json([
                         'status' => false,
                         'message' =>
-                            'You are not allowed to manage this teacher attendance.'
+                            'You are not allowed to manage this teacher attendance.',
                     ], 403);
                 }
 
-                /*
-                |--------------------------------------------------------------------------
-                | Teacher-এর branch
-                |--------------------------------------------------------------------------
-                */
-
+                /**
+                 * --------------------------------------------------------------
+                 * Teacher-এর branch
+                 * --------------------------------------------------------------
+                 */
                 $branchId = $teacher->branch_id;
 
-                /*
-                |--------------------------------------------------------------------------
-                | Branch ছাড়া teacher হলে block
-                |--------------------------------------------------------------------------
-                */
-
+                /**
+                 * --------------------------------------------------------------
+                 * Branch ছাড়া teacher হলে block
+                 * --------------------------------------------------------------
+                 */
                 if (!$branchId) {
-
                     DB::rollBack();
 
                     return response()->json([
                         'status' => false,
                         'message' =>
-                            'This teacher is not assigned to any branch.'
+                            'This teacher is not assigned to any branch.',
                     ], 422);
                 }
-
 
                 $shiftName = $item['shift_name']
                     ?? 'General Shift';
 
                 $isLeave = $item['leave'] ?? false;
 
-
-                /*
-                |--------------------------------------------------------------------------
-                | Attendance Status
-                |--------------------------------------------------------------------------
-                */
-
+                /**
+                 * --------------------------------------------------------------
+                 * Attendance Status
+                 * --------------------------------------------------------------
+                 */
                 if ($isHoliday) {
-
                     $status = 'Off Day';
                     $inTime = null;
                     $outTime = null;
                     $note = 'Holiday / Off Day';
-
                 } elseif ($isLeave) {
-
                     $status = 'Leave';
                     $inTime = null;
                     $outTime = null;
                     $note = null;
-
                 } elseif (empty($item['status'])) {
-
                     $status = 'Absent';
                     $inTime = null;
                     $outTime = null;
                     $note = null;
-
                 } else {
-
                     $status = $item['status'];
                     $inTime = $item['in_time'] ?? null;
                     $outTime = $item['out_time'] ?? null;
                     $note = $item['note'] ?? null;
                 }
 
-
-                /*
-                |--------------------------------------------------------------------------
-                | Save / Update
-                |--------------------------------------------------------------------------
-                |
-                | একই teacher + shift + date = duplicate হবে না
-                |
-                */
-
+                /**
+                 * --------------------------------------------------------------
+                 * Save / Update
+                 * --------------------------------------------------------------
+                 *
+                 * একই teacher + shift + date = duplicate হবে না।
+                 */
                 $attendance = TeachersAttendance::updateOrCreate(
-
                     [
-                        'teacher_id' => $teacher->id,
-                        'shift_name' => $shiftName,
-                        'date' => $date,
+                        'teacher_id' =>
+                            $teacher->id,
+
+                        'shift_name' =>
+                            $shiftName,
+
+                        'date' =>
+                            $date,
                     ],
-
                     [
-                        'branch_id' => $branchId,
+                        'branch_id' =>
+                            $branchId,
 
-                        'status' => $status,
+                        'status' =>
+                            $status,
 
-                        'in_time' => $inTime,
+                        'in_time' =>
+                            $inTime,
 
-                        'out_time' => $outTime,
+                        'out_time' =>
+                            $outTime,
 
-                        'note' => $note,
+                        'note' =>
+                            $note,
 
-                        'leave' => $isLeave,
+                        'leave' =>
+                            $isLeave,
                     ]
                 );
 
                 $savedAttendances[] = $attendance;
             }
 
-
             DB::commit();
-
 
             return response()->json([
                 'status' => true,
-                'message' => 'Attendance saved successfully.',
-                'data' => $savedAttendances
+                'message' =>
+                    'Attendance saved successfully.',
+                'data' =>
+                    $savedAttendances,
             ], 201);
 
-
         } catch (\Exception $e) {
-
             DB::rollBack();
 
             return response()->json([
                 'status' => false,
-                'message' => 'Failed to save attendance.',
-                'error' => $e->getMessage()
+                'message' =>
+                    'Failed to save attendance.',
+                'error' =>
+                    $e->getMessage(),
             ], 500);
         }
     }
 
-
     /**
+     * --------------------------------------------------------------------------
      * Display single attendance.
+     * --------------------------------------------------------------------------
      */
     public function show($id)
     {
         try {
-
-            $authUser = request()->user();
-
-            $query = TeachersAttendance::with('teacher');
-
-            // Branch Isolation
-            if ($authUser && $authUser->role !== 'Manager') {
-
-                $query->where(
-                    'branch_id',
-                    $authUser->branch_id
-                );
-            }
-
-            $attendance = $query->find($id);
-
+            $attendance = $this->attendanceQuery()
+                ->with('teacher')
+                ->find($id);
 
             if (!$attendance) {
-
                 return response()->json([
                     'status' => false,
-                    'message' => 'Attendance record not found.'
+                    'message' =>
+                        'Attendance record not found.',
                 ], 404);
             }
 
-
             return response()->json([
                 'status' => true,
-                'data' => $attendance
+                'data' => $attendance,
             ], 200);
 
-
         } catch (\Exception $e) {
-
             return response()->json([
                 'status' => false,
-                'message' => 'Error retrieving record.',
-                'error' => $e->getMessage()
+                'message' =>
+                    'Error retrieving record.',
+                'error' =>
+                    $e->getMessage(),
             ], 500);
         }
     }
 
-
     /**
+     * --------------------------------------------------------------------------
      * Update attendance.
+     * --------------------------------------------------------------------------
      */
-    public function update(Request $request, $id)
-    {
-        $authUser = $request->user();
-
-        /*
-        |--------------------------------------------------------------------------
-        | Branch Isolation
-        |--------------------------------------------------------------------------
-        */
-
-        $query = TeachersAttendance::query();
-
-        if ($authUser && $authUser->role !== 'Manager') {
-
-            $query->where(
-                'branch_id',
-                $authUser->branch_id
-            );
-        }
-
-        $attendance = $query->find($id);
-
+    public function update(
+        Request $request,
+        $id
+    ) {
+        $attendance = $this->attendanceQuery()
+            ->find($id);
 
         if (!$attendance) {
-
             return response()->json([
                 'status' => false,
-                'message' => 'Attendance record not found.'
+                'message' =>
+                    'Attendance record not found.',
             ], 404);
         }
 
-
         $request->validate([
-            'status'
-                => 'nullable|in:Present,Absent,Late,Leave,Off Day',
+            'status' =>
+                'nullable|in:Present,Absent,Late,Leave,Off Day',
 
-            'leave'
-                => 'nullable|boolean',
+            'leave' =>
+                'nullable|boolean',
 
-            'in_time'
-                => 'nullable',
+            'in_time' =>
+                'nullable',
 
-            'out_time'
-                => 'nullable',
+            'out_time' =>
+                'nullable',
 
-            'note'
-                => 'nullable|string|max:255',
+            'note' =>
+                'nullable|string|max:255',
         ]);
 
-
         try {
-
             $isLeave = $request->has('leave')
                 ? (bool) $request->leave
                 : (bool) $attendance->leave;
 
-
             if ($isLeave) {
-
                 $attendance->update([
                     'leave' => true,
                     'status' => 'Leave',
@@ -400,239 +425,279 @@ class TeachersAttendanceController extends Controller
                     'out_time' => null,
                     'note' => null,
                 ]);
-
             } else {
-
                 $attendance->update([
                     'leave' => false,
 
-                    'status' => $request->has('status')
-                        ? $request->status
-                        : $attendance->status,
+                    'status' =>
+                        $request->has('status')
+                            ? $request->status
+                            : $attendance->status,
 
-                    'in_time' => $request->has('in_time')
-                        ? $request->in_time
-                        : $attendance->in_time,
+                    'in_time' =>
+                        $request->has('in_time')
+                            ? $request->in_time
+                            : $attendance->in_time,
 
-                    'out_time' => $request->has('out_time')
-                        ? $request->out_time
-                        : $attendance->out_time,
+                    'out_time' =>
+                        $request->has('out_time')
+                            ? $request->out_time
+                            : $attendance->out_time,
 
-                    'note' => $request->has('note')
-                        ? $request->note
-                        : $attendance->note,
+                    'note' =>
+                        $request->has('note')
+                            ? $request->note
+                            : $attendance->note,
                 ]);
             }
 
-
             return response()->json([
                 'status' => true,
-                'message' => 'Attendance updated successfully.',
-                'data' => $attendance->fresh()
+                'message' =>
+                    'Attendance updated successfully.',
+                'data' =>
+                    $attendance->fresh(),
             ], 200);
 
-
         } catch (\Exception $e) {
-
             return response()->json([
                 'status' => false,
-                'message' => 'Failed to update attendance.',
-                'error' => $e->getMessage()
+                'message' =>
+                    'Failed to update attendance.',
+                'error' =>
+                    $e->getMessage(),
             ], 500);
         }
     }
 
-
     /**
+     * --------------------------------------------------------------------------
      * Teacher yearly summary report.
+     * --------------------------------------------------------------------------
      */
-    public function teacherSummaryReport(Request $request)
-    {
-        $year = $request->input('year', date('Y'));
-
-        $authUser = $request->user();
+    public function teacherSummaryReport(
+        Request $request
+    ) {
+        $year = $request->input(
+            'year',
+            date('Y')
+        );
 
         try {
+            $teachers = $this->teacherQuery()
+                ->with('shifts')
+                ->get();
 
-            $teacherQuery = Teacher::with('shifts');
+            $summary = $teachers->map(
+                function ($teacher) use ($year) {
 
-            /*
-            |--------------------------------------------------------------------------
-            | Branch Isolation
-            |--------------------------------------------------------------------------
-            */
+                    $attendanceQuery =
+                        TeachersAttendance::where(
+                            'teacher_id',
+                            $teacher->id
+                        )
+                            ->whereYear(
+                                'date',
+                                $year
+                            );
 
-            if ($authUser && $authUser->role !== 'Manager') {
+                    /**
+                     * Selected branch হলে attendance-ও
+                     * selected branch-এর মধ্যেই থাকবে।
+                     */
+                    $currentBranchId =
+                        $this->currentBranchId();
 
-                $teacherQuery->where(
-                    'branch_id',
-                    $authUser->branch_id
-                );
-            }
+                    if ($currentBranchId !== null) {
+                        $attendanceQuery->where(
+                            'branch_id',
+                            $currentBranchId
+                        );
+                    }
 
+                    $attendances =
+                        $attendanceQuery->get();
 
-            $teachers = $teacherQuery->get();
+                    $shiftNames =
+                        $teacher->shifts
+                            ->pluck('name')
+                            ->implode(', ');
 
+                    return [
+                        'id' =>
+                            $teacher->id,
 
-            $summary = $teachers->map(function ($teacher) use ($year) {
+                        'name' =>
+                            $teacher->full_name
+                            ?? $teacher->name
+                            ?? 'N/A',
 
-                $attendanceQuery = TeachersAttendance::where(
-                    'teacher_id',
-                    $teacher->id
-                )
-                    ->whereYear('date', $year);
+                        'code' =>
+                            $teacher->teacher_id
+                            ?? $teacher->code
+                            ?? 'N/A',
 
+                        'shift' =>
+                            !empty($shiftNames)
+                                ? $shiftNames
+                                : 'General',
 
-                $attendances = $attendanceQuery->get();
+                        'total_present' =>
+                            $attendances
+                                ->where(
+                                    'status',
+                                    'Present'
+                                )
+                                ->count(),
 
+                        'total_late' =>
+                            $attendances
+                                ->where(
+                                    'status',
+                                    'Late'
+                                )
+                                ->count(),
 
-                $shiftNames = $teacher->shifts
-                    ->pluck('name')
-                    ->implode(', ');
+                        'total_absent' =>
+                            $attendances
+                                ->where(
+                                    'status',
+                                    'Absent'
+                                )
+                                ->count(),
 
+                        'total_leave' =>
+                            $attendances
+                                ->where(
+                                    'status',
+                                    'Leave'
+                                )
+                                ->count(),
 
-                return [
-                    'id' => $teacher->id,
+                        'total_off_day' =>
+                            $attendances
+                                ->where(
+                                    'status',
+                                    'Off Day'
+                                )
+                                ->count(),
+                    ];
+                }
+            );
 
-                    'name' =>
-                        $teacher->full_name
-                        ?? $teacher->name
-                        ?? 'N/A',
-
-                    'code' =>
-                        $teacher->teacher_id
-                        ?? $teacher->code
-                        ?? 'N/A',
-
-                    'shift' =>
-                        !empty($shiftNames)
-                            ? $shiftNames
-                            : 'General',
-
-                    'total_present' =>
-                        $attendances
-                            ->where('status', 'Present')
-                            ->count(),
-
-                    'total_late' =>
-                        $attendances
-                            ->where('status', 'Late')
-                            ->count(),
-
-                    'total_absent' =>
-                        $attendances
-                            ->where('status', 'Absent')
-                            ->count(),
-
-                    'total_leave' =>
-                        $attendances
-                            ->where('status', 'Leave')
-                            ->count(),
-
-                    'total_off_day' =>
-                        $attendances
-                            ->where('status', 'Off Day')
-                            ->count(),
-                ];
-            });
-
-
-            return response()->json($summary, 200);
-
+            return response()->json(
+                $summary,
+                200
+            );
 
         } catch (\Exception $e) {
-
             return response()->json([
                 'status' => false,
-                'message' => 'Failed to fetch summary report.',
-                'error' => $e->getMessage()
+                'message' =>
+                    'Failed to fetch summary report.',
+                'error' =>
+                    $e->getMessage(),
             ], 500);
         }
     }
 
-
     /**
+     * --------------------------------------------------------------------------
      * Single teacher January - December yearly report.
+     * --------------------------------------------------------------------------
      */
     public function singleTeacherYearlyReport(
         $id,
         Request $request
     ) {
-        $year = $request->input('year', date('Y'));
-
-        $authUser = $request->user();
+        $year = $request->input(
+            'year',
+            date('Y')
+        );
 
         try {
-
-            /*
-            |--------------------------------------------------------------------------
-            | Teacher Branch Isolation
-            |--------------------------------------------------------------------------
-            */
-
-            $teacherQuery = Teacher::query();
-
-            if ($authUser && $authUser->role !== 'Manager') {
-
-                $teacherQuery->where(
-                    'branch_id',
-                    $authUser->branch_id
-                );
-            }
-
-
-            $teacher = $teacherQuery->findOrFail($id);
-
+            /**
+             * Teacher must belong to current branch context.
+             */
+            $teacher =
+                $this->teacherQuery()
+                    ->findOrFail($id);
 
             $monthlyReports = [];
 
-
-            for ($month = 1; $month <= 12; $month++) {
-
+            for (
+                $month = 1;
+                $month <= 12;
+                $month++
+            ) {
                 $monthName = Carbon::create()
                     ->month($month)
                     ->format('F');
 
-
-                $attendances = TeachersAttendance::where(
-                    'teacher_id',
-                    $id
-                )
-                    ->where('branch_id', $teacher->branch_id)
-                    ->whereYear('date', $year)
-                    ->whereMonth('date', $month)
-                    ->get();
-
+                $attendances =
+                    TeachersAttendance::where(
+                        'teacher_id',
+                        $id
+                    )
+                        ->where(
+                            'branch_id',
+                            $teacher->branch_id
+                        )
+                        ->whereYear(
+                            'date',
+                            $year
+                        )
+                        ->whereMonth(
+                            'date',
+                            $month
+                        )
+                        ->get();
 
                 $monthlyReports[] = [
+                    'month_number' =>
+                        $month,
 
-                    'month_number' => $month,
-
-                    'month_name' => $monthName,
+                    'month_name' =>
+                        $monthName,
 
                     'present' =>
                         $attendances
-                            ->where('status', 'Present')
+                            ->where(
+                                'status',
+                                'Present'
+                            )
                             ->count(),
 
                     'late' =>
                         $attendances
-                            ->where('status', 'Late')
+                            ->where(
+                                'status',
+                                'Late'
+                            )
                             ->count(),
 
                     'absent' =>
                         $attendances
-                            ->where('status', 'Absent')
+                            ->where(
+                                'status',
+                                'Absent'
+                            )
                             ->count(),
 
                     'leave' =>
                         $attendances
-                            ->where('status', 'Leave')
+                            ->where(
+                                'status',
+                                'Leave'
+                            )
                             ->count(),
 
                     'off_day' =>
                         $attendances
-                            ->where('status', 'Off Day')
+                            ->where(
+                                'status',
+                                'Off Day'
+                            )
                             ->count(),
 
                     'total_days' =>
@@ -640,79 +705,62 @@ class TeachersAttendanceController extends Controller
                 ];
             }
 
-
             return response()->json([
                 'status' => true,
-                'teacher' => $teacher,
-                'year' => $year,
-                'monthly_reports' => $monthlyReports
+                'teacher' =>
+                    $teacher,
+                'year' =>
+                    $year,
+                'monthly_reports' =>
+                    $monthlyReports,
             ], 200);
 
-
         } catch (\Exception $e) {
-
             return response()->json([
                 'status' => false,
-                'message' => 'Failed to fetch yearly report.',
-                'error' => $e->getMessage()
+                'message' =>
+                    'Failed to fetch yearly report.',
+                'error' =>
+                    $e->getMessage(),
             ], 500);
         }
     }
 
-
     /**
+     * --------------------------------------------------------------------------
      * Delete attendance.
+     * --------------------------------------------------------------------------
      */
     public function destroy($id)
     {
         try {
-
-            $authUser = request()->user();
-
-            $query = TeachersAttendance::query();
-
-            /*
-            |--------------------------------------------------------------------------
-            | Branch Isolation
-            |--------------------------------------------------------------------------
-            */
-
-            if ($authUser && $authUser->role !== 'Manager') {
-
-                $query->where(
-                    'branch_id',
-                    $authUser->branch_id
-                );
-            }
-
-
-            $attendance = $query->find($id);
-
+            $attendance =
+                $this->attendanceQuery()
+                    ->find($id);
 
             if (!$attendance) {
-
                 return response()->json([
                     'status' => false,
-                    'message' => 'Attendance record not found.'
+                    'message' =>
+                        'Attendance record not found.',
                 ], 404);
             }
 
-
             $attendance->delete();
-
 
             return response()->json([
                 'status' => true,
-                'message' => 'Attendance record deleted successfully.'
+                'message' =>
+                    'Attendance record deleted successfully.',
             ], 200);
 
-
         } catch (\Exception $e) {
-
             return response()->json([
                 'status' => false,
-                'message' => 'Failed to delete record.',
-                'error' => $e->getMessage()
+                'message' =>
+                    'Failed to delete record.',
+                'error' =>
+                    $e->getMessage(),
             ], 500);
         }
     }

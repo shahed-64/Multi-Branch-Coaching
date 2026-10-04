@@ -17,12 +17,12 @@ class ResultController extends Controller
     /**
      * Result module access.
      *
-     * Manager            → All branches
-     * Branch Manager     → Own branch
-     * Admin              → Own branch
-     * Branch Admin       → Own branch
-     * Accountant         → No access
-     * Branch Accountant  → No access
+     * Manager          → All branches
+     * Branch Manager   → Own branch
+     * Admin            → Own branch
+     * Branch Admin     → Own branch
+     * Accountant       → No access
+     * Branch Accountant → No access
      */
     private function authorizeAccess(Request $request): ?JsonResponse
     {
@@ -68,6 +68,7 @@ class ResultController extends Controller
         */
 
         $resultsQuery = Result::with([
+            'student.section',
             'student.classInfo',
             'student.classGroup',
             'resultSubjects.subject',
@@ -96,7 +97,6 @@ class ResultController extends Controller
             $resultsQuery->whereHas(
                 'student',
                 function ($query) use ($studentSearch, $user) {
-
                     $query->where(
                         function ($q) use ($studentSearch) {
                             $q->where(
@@ -122,14 +122,20 @@ class ResultController extends Controller
             );
         }
 
+        /*
+        |--------------------------------------------------------------------------
+        | Latest Results + Pagination
+        |--------------------------------------------------------------------------
+        */
+
         $results = $resultsQuery
-    ->latest()
-    ->paginate(
-        $perPage,
-        ['*'],
-        'results_page',
-        (int) $request->query('results_page', 1)
-    );
+            ->latest()
+            ->paginate(
+                $perPage,
+                ['*'],
+                'results_page',
+                (int) $request->query('results_page', 1)
+            );
 
         /*
         |--------------------------------------------------------------------------
@@ -138,6 +144,7 @@ class ResultController extends Controller
         */
 
         $studentsQuery = Student::with([
+            'section',
             'classInfo.subjects',
             'classGroup.subjects',
         ]);
@@ -189,7 +196,6 @@ class ResultController extends Controller
         $allAdditionalSubjectIds = [];
 
         foreach ($students as $student) {
-
             if (!$student->classGroup) {
                 continue;
             }
@@ -210,7 +216,6 @@ class ResultController extends Controller
         */
 
         foreach ($results->getCollection() as $result) {
-
             $student = $result->student;
 
             if (!$student) {
@@ -231,6 +236,12 @@ class ResultController extends Controller
                 continue;
             }
 
+            /*
+            |--------------------------------------------------------------------------
+            | Examination
+            |--------------------------------------------------------------------------
+            */
+
             $examination = Examination::where(
                 'examination_type',
                 $result->exam_type
@@ -249,7 +260,6 @@ class ResultController extends Controller
             $subjectCount = 0;
 
             foreach ($result->resultSubjects as $resultSubject) {
-
                 $subject = $resultSubject->subject;
 
                 if (!$subject) {
@@ -302,7 +312,10 @@ class ResultController extends Controller
             }
 
             $result->gpa = $subjectCount > 0
-                ? round($totalPoint / $subjectCount, 2)
+                ? round(
+                    $totalPoint / $subjectCount,
+                    2
+                )
                 : 0;
         }
 
@@ -313,7 +326,6 @@ class ResultController extends Controller
         */
 
         foreach ($students as $student) {
-
             $subjects = collect();
 
             /*
@@ -347,15 +359,14 @@ class ResultController extends Controller
             */
 
             if ($student->classGroup) {
-
-                $mappedSubjectIds = GroupSubjectMapping::where(
-                    'class_group_id',
-                    $student->classGroup->id
-                )
-                    ->pluck('subject_id');
+                $mappedSubjectIds =
+                    GroupSubjectMapping::where(
+                        'class_group_id',
+                        $student->classGroup->id
+                    )
+                        ->pluck('subject_id');
 
                 if ($mappedSubjectIds->isNotEmpty()) {
-
                     $mappedSubjects = Subject::whereIn(
                         'id',
                         $mappedSubjectIds
@@ -377,11 +388,27 @@ class ResultController extends Controller
                 ->values();
         }
 
+        /*
+        |--------------------------------------------------------------------------
+        | Response
+        |--------------------------------------------------------------------------
+        */
+
         return response()->json([
             'status' => true,
+
             'results' => $results,
+
             'students' => $students,
-            'pagination' => [
+
+            /*
+            |--------------------------------------------------------------------------
+            | IMPORTANT:
+            | Vue expects results_pagination
+            |--------------------------------------------------------------------------
+            */
+
+            'results_pagination' => [
                 'current_page' =>
                     $results->currentPage(),
 
@@ -393,7 +420,14 @@ class ResultController extends Controller
 
                 'total' =>
                     $results->total(),
+
+                'from' =>
+                    $results->firstItem(),
+
+                'to' =>
+                    $results->lastItem(),
             ],
+
             'total_students' =>
                 $students->count(),
         ]);
@@ -420,6 +454,7 @@ class ResultController extends Controller
             'student_id' => [
                 'required',
                 'exists:students,id',
+
                 Rule::unique('results')->where(
                     function ($query) use ($request) {
                         return $query
@@ -479,6 +514,7 @@ class ResultController extends Controller
         */
 
         $student = Student::with([
+            'section',
             'classInfo.subjects',
             'classGroup.subjects',
         ])->find($validated['student_id']);
@@ -503,7 +539,8 @@ class ResultController extends Controller
         ) {
             return response()->json([
                 'status' => false,
-                'message' => 'Unauthorized access to this student.',
+                'message' =>
+                    'Unauthorized access to this student.',
             ], 403);
         }
 
@@ -538,7 +575,8 @@ class ResultController extends Controller
         if (!$examination) {
             return response()->json([
                 'status' => false,
-                'message' => 'Examination not found for this branch.',
+                'message' =>
+                    'Examination not found for this branch.',
             ], 422);
         }
 
@@ -557,7 +595,6 @@ class ResultController extends Controller
         */
 
         if ($student->classInfo) {
-
             $classSubjectIds =
                 $student->classInfo->subjects
                     ->pluck('id');
@@ -575,7 +612,6 @@ class ResultController extends Controller
         */
 
         if ($student->classGroup) {
-
             $groupSubjectIds =
                 $student->classGroup->subjects
                     ->pluck('id');
@@ -593,7 +629,6 @@ class ResultController extends Controller
         */
 
         if ($student->classGroup) {
-
             $mappedSubjectIds =
                 GroupSubjectMapping::where(
                     'class_group_id',
@@ -615,13 +650,11 @@ class ResultController extends Controller
         /*
         |--------------------------------------------------------------------------
         | Explicit Subject Branch Validation
-        |--------------------------------------------------------------------------
         |
         | Every submitted subject must:
         | 1. Exist
         | 2. Belong to student's branch
         | 3. Be assigned to this student
-        |
         |--------------------------------------------------------------------------
         */
 
@@ -632,16 +665,17 @@ class ResultController extends Controller
             ->unique()
             ->values();
 
-        $invalidBranchSubjectExists = Subject::whereIn(
-            'id',
-            $submittedSubjectIds
-        )
-            ->where(
-                'branch_id',
-                '!=',
-                $resultBranchId
+        $invalidBranchSubjectExists =
+            Subject::whereIn(
+                'id',
+                $submittedSubjectIds
             )
-            ->exists();
+                ->where(
+                    'branch_id',
+                    '!=',
+                    $resultBranchId
+                )
+                ->exists();
 
         if ($invalidBranchSubjectExists) {
             return response()->json([
@@ -658,9 +692,11 @@ class ResultController extends Controller
         */
 
         foreach ($submittedSubjectIds as $subjectId) {
-
-            if (!$assignedSubjectIds->contains($subjectId)) {
-
+            if (
+                !$assignedSubjectIds->contains(
+                    $subjectId
+                )
+            ) {
                 return response()->json([
                     'status' => false,
                     'message' =>
@@ -676,7 +712,6 @@ class ResultController extends Controller
         */
 
         foreach ($validated['subjects'] as $subjectData) {
-
             $subject = Subject::where(
                 'id',
                 $subjectData['subject_id']
@@ -718,22 +753,28 @@ class ResultController extends Controller
         /*
         |--------------------------------------------------------------------------
         | Create Result
+        |
+        | IMPORTANT FIX:
+        | branch_id is assigned directly so it cannot be skipped
+        | by Result model $fillable configuration.
         |--------------------------------------------------------------------------
         */
 
-        $result = Result::create([
-            'student_id' =>
-                $student->id,
+        $result = new Result();
 
-            'exam_year' =>
-                $validated['exam_year'],
+        $result->student_id =
+            $student->id;
 
-            'exam_type' =>
-                $validated['exam_type'],
+        $result->exam_year =
+            $validated['exam_year'];
 
-            'branch_id' =>
-                $resultBranchId,
-        ]);
+        $result->exam_type =
+            $validated['exam_type'];
+
+        $result->branch_id =
+            $resultBranchId;
+
+        $result->save();
 
         /*
         |--------------------------------------------------------------------------
@@ -742,7 +783,6 @@ class ResultController extends Controller
         */
 
         foreach ($validated['subjects'] as $subjectData) {
-
             $result->resultSubjects()->create([
                 'subject_id' =>
                     $subjectData['subject_id'],
@@ -752,15 +792,31 @@ class ResultController extends Controller
             ]);
         }
 
+        /*
+        |--------------------------------------------------------------------------
+        | Reload Complete Result
+        |--------------------------------------------------------------------------
+        */
+
         $result->load([
+            'student.section',
             'student.classInfo',
             'student.classGroup',
             'resultSubjects.subject',
         ]);
 
+        /*
+        |--------------------------------------------------------------------------
+        | Response
+        |--------------------------------------------------------------------------
+        */
+
         return response()->json([
             'status' => true,
-            'message' => 'Result created successfully.',
+
+            'message' =>
+                'Result created successfully.',
+
             'data' => $result,
         ], 201);
     }
@@ -785,6 +841,7 @@ class ResultController extends Controller
         */
 
         $result = Result::with([
+            'student.section',
             'student.classInfo',
             'student.classGroup.subjects',
             'resultSubjects.subject',
@@ -862,10 +919,10 @@ class ResultController extends Controller
         $subjects = [];
 
         $totalPoint = 0;
+
         $subjectCount = 0;
 
         foreach ($result->resultSubjects as $resultSubject) {
-
             $subject = $resultSubject->subject;
 
             if (!$subject) {
@@ -898,7 +955,8 @@ class ResultController extends Controller
                 $resultSubject->marks ?? 0;
 
             $percentage =
-                ((float) $marks / (float) $fullMark) * 100;
+                ((float) $marks / (float) $fullMark)
+                * 100;
 
             $grading = GradingSystem::where(
                 'min_percentage',
@@ -921,12 +979,12 @@ class ResultController extends Controller
                     : 0;
 
             $totalPoint += $point;
+
             $subjectCount++;
 
             $isAdditional = false;
 
             if ($result->student?->classGroup) {
-
                 $isAdditional =
                     $result->student
                         ->classGroup
@@ -953,7 +1011,10 @@ class ResultController extends Controller
                     (float) $fullMark,
 
                 'percentage' =>
-                    round($percentage, 2),
+                    round(
+                        $percentage,
+                        2
+                    ),
 
                 'grade' =>
                     $grade,
@@ -981,8 +1042,15 @@ class ResultController extends Controller
 
         $gpa = min(5, $gpa);
 
+        /*
+        |--------------------------------------------------------------------------
+        | Response
+        |--------------------------------------------------------------------------
+        */
+
         return response()->json([
             'status' => true,
+
             'data' => [
                 'id' =>
                     $result->id,

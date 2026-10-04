@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\OtherPayment;
 use App\Models\Payment;
 use App\Models\Student;
+use App\Services\BranchContext;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -19,6 +20,22 @@ class PaymentController extends Controller
     private function staff()
     {
         return request()->user();
+    }
+
+    /**
+     * --------------------------------------------------------------------------
+     * CURRENT BRANCH CONTEXT
+     * --------------------------------------------------------------------------
+     *
+     * Manager + All Branches  = null
+     * Manager + Selected Branch = branch id
+     * Branch Manager / Branch Accountant = own branch id
+     *
+     * --------------------------------------------------------------------------
+     */
+    private function currentBranchId(): ?int
+    {
+        return app(BranchContext::class)->id();
     }
 
     /**
@@ -80,8 +97,6 @@ class PaymentController extends Controller
      * --------------------------------------------------------------------------
      * MANAGER CHECK
      * --------------------------------------------------------------------------
-     * Manager = All Branch Access
-     * --------------------------------------------------------------------------
      */
     private function isManager(): bool
     {
@@ -109,37 +124,46 @@ class PaymentController extends Controller
      * PAYMENT QUERY WITH BRANCH ISOLATION
      * --------------------------------------------------------------------------
      *
-     * Manager
-     *      -> All Branches
+     * Manager + All Branches
+     *     -> All branches
+     *
+     * Manager + Selected Branch
+     *     -> Selected branch only
      *
      * Branch Manager
-     *      -> Own Branch
+     *     -> Own branch only
      *
      * Branch Accountant
-     *      -> Own Branch
-     *
-     * Any other role
-     *      -> No payment data
+     *     -> Own branch only
      *
      * --------------------------------------------------------------------------
      */
     private function branchPaymentQuery()
     {
         $query = Payment::query();
+
         $staff = $this->staff();
 
-        /**
-         * No authenticated staff
-         */
         if (!$staff) {
             return $query->whereRaw('1 = 0');
         }
 
         /**
-         * Manager = All Branches
+         * Manager
          */
         if ($staff->role === 'Manager') {
-            return $query;
+
+            $currentBranchId = $this->currentBranchId();
+
+            // All Branches
+            if ($currentBranchId === null) {
+                return $query;
+            }
+
+            // Selected Branch
+            return $query->whereHas('student', function ($q) use ($currentBranchId) {
+                $q->where('branch_id', $currentBranchId);
+            });
         }
 
         /**
@@ -155,9 +179,6 @@ class PaymentController extends Controller
                 ]
             )
         ) {
-            /**
-             * Staff must have a branch
-             */
             if (empty($staff->branch_id)) {
                 return $query->whereRaw('1 = 0');
             }
@@ -182,20 +203,30 @@ class PaymentController extends Controller
     private function branchStudentQuery()
     {
         $query = Student::query();
+
         $staff = $this->staff();
 
-        /**
-         * No authenticated staff
-         */
         if (!$staff) {
             return $query->whereRaw('1 = 0');
         }
 
         /**
-         * Manager = All Branches
+         * Manager
          */
         if ($staff->role === 'Manager') {
-            return $query;
+
+            $currentBranchId = $this->currentBranchId();
+
+            // All Branches
+            if ($currentBranchId === null) {
+                return $query;
+            }
+
+            // Selected Branch
+            return $query->where(
+                'branch_id',
+                $currentBranchId
+            );
         }
 
         /**
@@ -236,37 +267,36 @@ class PaymentController extends Controller
      * OtherPayment does not have branch_id directly.
      *
      * OtherPayment
-     *      -> student
-     *          -> branch_id
-     *
-     * Manager
-     *      -> All Branches
-     *
-     * Branch Manager
-     *      -> Own Branch
-     *
-     * Branch Accountant
-     *      -> Own Branch
-     *
+     *     -> student
+     *         -> branch_id
      * --------------------------------------------------------------------------
      */
     private function branchOtherPaymentQuery()
     {
         $query = OtherPayment::query();
+
         $staff = $this->staff();
 
-        /**
-         * No authenticated staff
-         */
         if (!$staff) {
             return $query->whereRaw('1 = 0');
         }
 
         /**
-         * Manager = All Branches
+         * Manager
          */
         if ($staff->role === 'Manager') {
-            return $query;
+
+            $currentBranchId = $this->currentBranchId();
+
+            // All Branches
+            if ($currentBranchId === null) {
+                return $query;
+            }
+
+            // Selected Branch
+            return $query->whereHas('student', function ($q) use ($currentBranchId) {
+                $q->where('branch_id', $currentBranchId);
+            });
         }
 
         /**
@@ -307,18 +337,24 @@ class PaymentController extends Controller
     {
         $staff = $this->staff();
 
-        /**
-         * No authenticated staff
-         */
         if (!$staff) {
             return false;
         }
 
         /**
-         * Manager = All Branches
+         * Manager
          */
         if ($staff->role === 'Manager') {
-            return true;
+
+            $currentBranchId = $this->currentBranchId();
+
+            // All Branches
+            if ($currentBranchId === null) {
+                return true;
+            }
+
+            // Selected Branch
+            return (int) $student->branch_id === (int) $currentBranchId;
         }
 
         /**
@@ -397,7 +433,6 @@ class PaymentController extends Controller
 
         /**
          * Today's Other Payment
-         * Branch isolated
          */
         $todayOtherCollection = (clone $this->branchOtherPaymentQuery())
             ->whereDate('payment_date', today())
@@ -427,10 +462,6 @@ class PaymentController extends Controller
 
         /**
          * This Month Student Collection
-         *
-         * paid_amount
-         * + admission_fee
-         * + exam_fee
          */
         $thisMonthCollectionQuery = (clone $paymentQuery)
             ->whereMonth(
@@ -456,7 +487,6 @@ class PaymentController extends Controller
 
         /**
          * This Month Other Payment
-         * Branch isolated
          */
         $otherPaymentCollection = (clone $this->branchOtherPaymentQuery())
             ->whereMonth(
@@ -826,12 +856,6 @@ class PaymentController extends Controller
         $students = $this->branchStudentQuery()
             ->with([
                 'payments' => function ($query) {
-                    /**
-                     * Payment relationship is already loaded
-                     * through branch-isolated students.
-                     *
-                     * No additional global branch data is allowed.
-                     */
                     $query->latest();
                 }
             ])
@@ -839,6 +863,7 @@ class PaymentController extends Controller
 
         $report = $students->map(
             function ($student) {
+
                 $totalPaid =
                     $student->payments
                         ->sum('paid_amount');
@@ -864,6 +889,7 @@ class PaymentController extends Controller
                 $unpaidMonths = 0;
 
                 while ($startDate <= $endDate) {
+
                     $monthName =
                         $startDate->format('F');
 

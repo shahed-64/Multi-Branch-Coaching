@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\StaffAttendance;
 use App\Models\Staff;
 use App\Models\Holiday;
+use App\Services\BranchContext;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
@@ -13,38 +14,114 @@ class StaffAttendanceController extends Controller
 {
     /**
      * ============================================================
+     * CURRENT BRANCH
+     * ============================================================
+     *
+     * null = Manager + All Branches
+     * branch id = selected branch / own branch
+     */
+    private function currentBranchId(): ?int
+    {
+        return app(BranchContext::class)->id();
+    }
+
+    /**
+     * ============================================================
+     * STAFF ATTENDANCE QUERY
+     * ============================================================
+     *
+     * Manager + All Branches
+     *      -> all records
+     *
+     * Manager + selected branch
+     *      -> selected branch only
+     *
+     * Non-Manager
+     *      -> own branch
+     */
+    private function attendanceQuery()
+    {
+        $query = StaffAttendance::query();
+
+        $currentBranchId = $this->currentBranchId();
+
+        if ($currentBranchId !== null) {
+            $query->where(
+                'branch_id',
+                $currentBranchId
+            );
+        }
+
+        return $query;
+    }
+
+    /**
+     * ============================================================
+     * STAFF QUERY
+     * ============================================================
+     */
+    private function staffQuery()
+    {
+        $query = Staff::query();
+
+        $currentBranchId = $this->currentBranchId();
+
+        if ($currentBranchId !== null) {
+            $query->where(
+                'branch_id',
+                $currentBranchId
+            );
+        }
+
+        return $query;
+    }
+
+    /**
+     * ============================================================
      * INDEX
      * ============================================================
+     *
      * Date / Month / Shift অনুযায়ী staff attendance পাওয়া যাবে।
      */
     public function index(Request $request)
     {
-        $authUser = $request->user();
+        $query = $this->attendanceQuery();
 
-        $query = StaffAttendance::query();
-
-        // Manager → সব branch
-        // Admin / Accountant → নিজের branch
-        if ($authUser && $authUser->role !== 'Manager') {
-            $query->where('branch_id', $authUser->branch_id);
-        }
-
-        // Specific date
+        /**
+         * Specific date
+         */
         if ($request->filled('date')) {
-            $query->where('date', $request->date);
+            $query->where(
+                'date',
+                $request->date
+            );
         }
 
-        // Specific month
+        /**
+         * Specific month
+         */
         if ($request->filled('month')) {
-            $month = Carbon::parse($request->month);
+            $month = Carbon::parse(
+                $request->month
+            );
 
-            $query->whereYear('date', $month->year)
-                ->whereMonth('date', $month->month);
+            $query->whereYear(
+                'date',
+                $month->year
+            )->whereMonth(
+                'date',
+                $month->month
+            );
         }
 
-        // Shift filter
+        /**
+         * Shift filter
+         */
         if ($request->filled('shift_name')) {
-            $query->where('shift_name', $request->shift_name);
+            $query->where(
+                'shift_name',
+                $request->shift_name
+            );
         }
 
         $attendances = $query
@@ -58,11 +135,11 @@ class StaffAttendanceController extends Controller
         ], 200);
     }
 
-
     /**
      * ============================================================
      * STORE
      * ============================================================
+     *
      * একসাথে একাধিক Staff attendance save/update করবে।
      *
      * IMPORTANT:
@@ -71,9 +148,11 @@ class StaffAttendanceController extends Controller
     public function store(Request $request)
     {
         $request->validate([
-            'date' => 'required|date',
+            'date' =>
+                'required|date',
 
-            'attendances' => 'required|array',
+            'attendances' =>
+                'required|array',
 
             'attendances.*.staff_id' =>
                 'required|exists:staff,id',
@@ -110,10 +189,17 @@ class StaffAttendanceController extends Controller
              * CHECK HOLIDAY
              * ----------------------------------------------------
              */
-            $isHoliday = Holiday::where('start_date', '<=', $date)
-                ->where('end_date', '>=', $date)
+            $isHoliday = Holiday::where(
+                'start_date',
+                '<=',
+                $date
+            )
+                ->where(
+                    'end_date',
+                    '>=',
+                    $date
+                )
                 ->exists();
-
 
             /**
              * ----------------------------------------------------
@@ -122,20 +208,14 @@ class StaffAttendanceController extends Controller
              */
             if ($isHoliday) {
 
-                $holidayQuery = StaffAttendance::where(
-                    'date',
-                    $date
-                );
+                $holidayQuery = $this->attendanceQuery();
 
-                // Non-manager নিজের branch-এর record delete করবে
-                if ($authUser && $authUser->role !== 'Manager') {
-                    $holidayQuery->where(
-                        'branch_id',
-                        $authUser->branch_id
-                    );
-                }
-
-                $holidayQuery->delete();
+                $holidayQuery
+                    ->where(
+                        'date',
+                        $date
+                    )
+                    ->delete();
 
                 DB::commit();
 
@@ -148,7 +228,6 @@ class StaffAttendanceController extends Controller
                 ], 200);
             }
 
-
             /**
              * ----------------------------------------------------
              * NORMAL DAY
@@ -156,40 +235,31 @@ class StaffAttendanceController extends Controller
              */
             $savedAttendances = [];
 
-            foreach ($request->attendances as $attendanceData) {
+            foreach (
+                $request->attendances
+                as $attendanceData
+            ) {
 
-                $staffId = $attendanceData['staff_id'];
+                $staffId =
+                    $attendanceData['staff_id'];
 
                 $shiftName =
                     $attendanceData['shift_name']
                     ?? 'General Shift';
 
-
                 /**
                  * ------------------------------------------------
-                 * FIND STAFF WITH BRANCH ACCESS
+                 * FIND STAFF WITH CENTRAL BRANCH ACCESS
                  * ------------------------------------------------
                  */
-                $staffQuery = Staff::query();
-
-                // Manager → সব staff
-                // Admin / Accountant → নিজের branch-এর staff
-                if ($authUser && $authUser->role !== 'Manager') {
-
-                    $staffQuery->where(
-                        'branch_id',
-                        $authUser->branch_id
-                    );
-                }
-
-                $staff = $staffQuery->find($staffId);
-
+                $staff = $this
+                    ->staffQuery()
+                    ->find($staffId);
 
                 /**
                  * অন্য branch-এর staff হলে block
                  */
                 if (!$staff) {
-
                     DB::rollBack();
 
                     return response()->json([
@@ -199,12 +269,10 @@ class StaffAttendanceController extends Controller
                     ], 403);
                 }
 
-
                 /**
                  * Staff-এর branch অবশ্যই থাকতে হবে
                  */
                 if (!$staff->branch_id) {
-
                     DB::rollBack();
 
                     return response()->json([
@@ -214,16 +282,19 @@ class StaffAttendanceController extends Controller
                     ], 422);
                 }
 
-
                 /**
                  * ------------------------------------------------
                  * FIND EXISTING ATTENDANCE
                  * ------------------------------------------------
+                 *
+                 * Current BranchContext অনুযায়ী query হবে।
                  */
-                $attendanceQuery = StaffAttendance::where(
-                    'staff_id',
-                    $staffId
-                )
+                $attendance = $this
+                    ->attendanceQuery()
+                    ->where(
+                        'staff_id',
+                        $staffId
+                    )
                     ->where(
                         'date',
                         $date
@@ -231,19 +302,8 @@ class StaffAttendanceController extends Controller
                     ->where(
                         'shift_name',
                         $shiftName
-                    );
-
-                // Non-manager নিজের branch-এর attendance-ই update করবে
-                if ($authUser && $authUser->role !== 'Manager') {
-
-                    $attendanceQuery->where(
-                        'branch_id',
-                        $authUser->branch_id
-                    );
-                }
-
-                $attendance = $attendanceQuery->first();
-
+                    )
+                    ->first();
 
                 /**
                  * ------------------------------------------------
@@ -251,7 +311,9 @@ class StaffAttendanceController extends Controller
                  * ------------------------------------------------
                  */
                 $isLeave =
-                    isset($attendanceData['leave']) &&
+                    isset(
+                        $attendanceData['leave']
+                    ) &&
                     filter_var(
                         $attendanceData['leave'],
                         FILTER_VALIDATE_BOOLEAN
@@ -259,8 +321,11 @@ class StaffAttendanceController extends Controller
 
                 $status =
                     $attendanceData['status']
-                    ?? ($isLeave ? 'Leave' : 'Absent');
-
+                    ?? (
+                        $isLeave
+                            ? 'Leave'
+                            : 'Absent'
+                    );
 
                 /**
                  * ------------------------------------------------
@@ -273,20 +338,35 @@ class StaffAttendanceController extends Controller
                 ) {
 
                     $data = [
-                        'staff_id' => $staffId,
-                        'branch_id' => $staff->branch_id,
-                        'date' => $date,
-                        'shift_name' => $shiftName,
-                        'status' => 'Leave',
-                        'leave' => true,
-                        'in_time' => null,
-                        'out_time' => null,
+                        'staff_id' =>
+                            $staffId,
+
+                        'branch_id' =>
+                            $staff->branch_id,
+
+                        'date' =>
+                            $date,
+
+                        'shift_name' =>
+                            $shiftName,
+
+                        'status' =>
+                            'Leave',
+
+                        'leave' =>
+                            true,
+
+                        'in_time' =>
+                            null,
+
+                        'out_time' =>
+                            null,
+
                         'note' =>
                             $attendanceData['note']
                             ?? 'Staff is on leave',
                     ];
                 }
-
 
                 /**
                  * ------------------------------------------------
@@ -299,24 +379,37 @@ class StaffAttendanceController extends Controller
                 ) {
 
                     $data = [
-                        'staff_id' => $staffId,
-                        'branch_id' => $staff->branch_id,
-                        'date' => $date,
-                        'shift_name' => $shiftName,
-                        'status' => $status,
-                        'leave' => false,
+                        'staff_id' =>
+                            $staffId,
+
+                        'branch_id' =>
+                            $staff->branch_id,
+
+                        'date' =>
+                            $date,
+
+                        'shift_name' =>
+                            $shiftName,
+
+                        'status' =>
+                            $status,
+
+                        'leave' =>
+                            false,
+
                         'in_time' =>
                             $attendanceData['in_time']
                             ?? null,
+
                         'out_time' =>
                             $attendanceData['out_time']
                             ?? null,
+
                         'note' =>
                             $attendanceData['note']
                             ?? null,
                     ];
                 }
-
 
                 /**
                  * ------------------------------------------------
@@ -326,41 +419,58 @@ class StaffAttendanceController extends Controller
                 else {
 
                     $data = [
-                        'staff_id' => $staffId,
-                        'branch_id' => $staff->branch_id,
-                        'date' => $date,
-                        'shift_name' => $shiftName,
-                        'status' => $status,
-                        'leave' => false,
-                        'in_time' => null,
-                        'out_time' => null,
+                        'staff_id' =>
+                            $staffId,
+
+                        'branch_id' =>
+                            $staff->branch_id,
+
+                        'date' =>
+                            $date,
+
+                        'shift_name' =>
+                            $shiftName,
+
+                        'status' =>
+                            $status,
+
+                        'leave' =>
+                            false,
+
+                        'in_time' =>
+                            null,
+
+                        'out_time' =>
+                            null,
+
                         'note' =>
                             $attendanceData['note']
                             ?? null,
                     ];
                 }
 
-
                 /**
                  * ------------------------------------------------
-                 * CREATE অথবা UPDATE
+                 * CREATE OR UPDATE
                  * ------------------------------------------------
                  */
                 if ($attendance) {
 
-                    $attendance->update($data);
+                    $attendance->update(
+                        $data
+                    );
 
                 } else {
 
                     $attendance =
-                        StaffAttendance::create($data);
+                        StaffAttendance::create(
+                            $data
+                        );
                 }
-
 
                 $savedAttendances[] =
                     $attendance->fresh();
             }
-
 
             DB::commit();
 
@@ -369,7 +479,8 @@ class StaffAttendanceController extends Controller
                 'is_holiday' => false,
                 'message' =>
                     'Attendance saved successfully.',
-                'data' => $savedAttendances
+                'data' =>
+                    $savedAttendances
             ], 201);
 
         } catch (\Exception $e) {
@@ -380,11 +491,11 @@ class StaffAttendanceController extends Controller
                 'status' => false,
                 'message' =>
                     'Failed to save attendance.',
-                'error' => $e->getMessage()
+                'error' =>
+                    $e->getMessage()
             ], 500);
         }
     }
-
 
     /**
      * ============================================================
@@ -395,20 +506,10 @@ class StaffAttendanceController extends Controller
     {
         try {
 
-            $authUser = request()->user();
-
-            $query = StaffAttendance::with('staff');
-
-            // Non-manager → নিজের branch
-            if ($authUser && $authUser->role !== 'Manager') {
-
-                $query->where(
-                    'branch_id',
-                    $authUser->branch_id
-                );
-            }
-
-            $attendance = $query->find($id);
+            $attendance = $this
+                ->attendanceQuery()
+                ->with('staff')
+                ->find($id);
 
             if (!$attendance) {
 
@@ -418,7 +519,6 @@ class StaffAttendanceController extends Controller
                         'Attendance record not found.'
                 ], 404);
             }
-
 
             /**
              * Holiday safety check
@@ -435,7 +535,6 @@ class StaffAttendanceController extends Controller
                 )
                 ->exists();
 
-
             if ($isHoliday) {
 
                 $attendance->delete();
@@ -448,7 +547,6 @@ class StaffAttendanceController extends Controller
                     'data' => null
                 ], 200);
             }
-
 
             return response()->json([
                 'status' => true,
@@ -467,28 +565,18 @@ class StaffAttendanceController extends Controller
         }
     }
 
-
     /**
      * ============================================================
      * UPDATE
      * ============================================================
      */
-    public function update(Request $request, $id)
-    {
-        $authUser = $request->user();
-
-        $query = StaffAttendance::query();
-
-        // Non-manager → নিজের branch
-        if ($authUser && $authUser->role !== 'Manager') {
-
-            $query->where(
-                'branch_id',
-                $authUser->branch_id
-            );
-        }
-
-        $attendance = $query->find($id);
+    public function update(
+        Request $request,
+        $id
+    ) {
+        $attendance = $this
+            ->attendanceQuery()
+            ->find($id);
 
         if (!$attendance) {
 
@@ -498,7 +586,6 @@ class StaffAttendanceController extends Controller
                     'Attendance record not found.'
             ], 404);
         }
-
 
         $request->validate([
             'status' =>
@@ -516,7 +603,6 @@ class StaffAttendanceController extends Controller
             'note' =>
                 'nullable|string|max:255',
         ]);
-
 
         try {
 
@@ -537,7 +623,6 @@ class StaffAttendanceController extends Controller
                 )
                 ->exists();
 
-
             /**
              * Holiday হলে record delete
              */
@@ -554,7 +639,6 @@ class StaffAttendanceController extends Controller
                 ], 200);
             }
 
-
             /**
              * ----------------------------------------------------
              * LEAVE
@@ -562,12 +646,11 @@ class StaffAttendanceController extends Controller
              */
             $isLeave =
                 $request->has('leave')
-                ? filter_var(
-                    $request->leave,
-                    FILTER_VALIDATE_BOOLEAN
-                )
-                : (bool) $attendance->leave;
-
+                    ? filter_var(
+                        $request->leave,
+                        FILTER_VALIDATE_BOOLEAN
+                    )
+                    : (bool) $attendance->leave;
 
             if (
                 $isLeave ||
@@ -576,16 +659,23 @@ class StaffAttendanceController extends Controller
 
                 $attendance->update([
                     'leave' => true,
-                    'status' => 'Leave',
-                    'in_time' => null,
-                    'out_time' => null,
+
+                    'status' =>
+                        'Leave',
+
+                    'in_time' =>
+                        null,
+
+                    'out_time' =>
+                        null,
+
                     'note' =>
                         $request->has('note')
-                        ? $request->note
-                        : 'Staff is on leave',
+                            ? $request->note
+                            : 'Staff is on leave',
                 ]);
-            }
 
+            }
 
             /**
              * ----------------------------------------------------
@@ -596,28 +686,28 @@ class StaffAttendanceController extends Controller
 
                 $attendance->update([
                     'leave' => false,
+
                     'status' =>
                         $request->has('status')
-                        ? $request->status
-                        : $attendance->status,
+                            ? $request->status
+                            : $attendance->status,
 
                     'in_time' =>
                         $request->has('in_time')
-                        ? $request->in_time
-                        : $attendance->in_time,
+                            ? $request->in_time
+                            : $attendance->in_time,
 
                     'out_time' =>
                         $request->has('out_time')
-                        ? $request->out_time
-                        : $attendance->out_time,
+                            ? $request->out_time
+                            : $attendance->out_time,
 
                     'note' =>
                         $request->has('note')
-                        ? $request->note
-                        : $attendance->note,
+                            ? $request->note
+                            : $attendance->note,
                 ]);
             }
-
 
             return response()->json([
                 'status' => true,
@@ -639,56 +729,49 @@ class StaffAttendanceController extends Controller
         }
     }
 
-
     /**
      * ============================================================
      * STAFF SUMMARY REPORT
      * ============================================================
      */
-    public function staffSummaryReport(Request $request)
-    {
+    public function staffSummaryReport(
+        Request $request
+    ) {
         $year =
             $request->input(
                 'year',
                 date('Y')
             );
 
-        $authUser = $request->user();
-
         try {
 
-            $staffQuery = Staff::query();
-
-            // Non-manager → নিজের branch
-            if ($authUser && $authUser->role !== 'Manager') {
-
-                $staffQuery->where(
-                    'branch_id',
-                    $authUser->branch_id
-                );
-            }
-
-            $staffs = $staffQuery->get();
-
+            /**
+             * Staff list follows BranchContext.
+             */
+            $staffs =
+                $this
+                    ->staffQuery()
+                    ->get();
 
             $summary = $staffs->map(
                 function ($staff) use ($year) {
 
+                    /**
+                     * Attendance also follows
+                     * current BranchContext.
+                     */
                     $attendances =
-                        StaffAttendance::where(
-                            'staff_id',
-                            $staff->id
-                        )
+                        $this
+                            ->attendanceQuery()
                             ->where(
-                                'branch_id',
-                                $staff->branch_id
+                                'staff_id',
+                                $staff->id
                             )
                             ->whereYear(
                                 'date',
                                 $year
                             )
                             ->get();
-
 
                     /**
                      * Holiday date বাদ দেওয়া
@@ -710,7 +793,6 @@ class StaffAttendanceController extends Controller
                                     ->exists();
                             }
                         );
-
 
                     return [
                         'id' =>
@@ -773,7 +855,6 @@ class StaffAttendanceController extends Controller
                 }
             );
 
-
             return response()->json(
                 $summary,
                 200
@@ -791,7 +872,6 @@ class StaffAttendanceController extends Controller
         }
     }
 
-
     /**
      * ============================================================
      * SINGLE STAFF YEARLY REPORT
@@ -807,26 +887,17 @@ class StaffAttendanceController extends Controller
                 date('Y')
             );
 
-        $authUser = $request->user();
-
         try {
 
-            $staffQuery = Staff::query();
-
-            // Non-manager → নিজের branch
-            if ($authUser && $authUser->role !== 'Manager') {
-
-                $staffQuery->where(
-                    'branch_id',
-                    $authUser->branch_id
-                );
-            }
-
-            $staff = $staffQuery->findOrFail($id);
-
+            /**
+             * BranchContext protects staff lookup.
+             */
+            $staff =
+                $this
+                    ->staffQuery()
+                    ->findOrFail($id);
 
             $monthlyReports = [];
-
 
             for (
                 $month = 1;
@@ -839,15 +910,15 @@ class StaffAttendanceController extends Controller
                         ->month($month)
                         ->format('F');
 
-
+                /**
+                 * Attendance follows current branch.
+                 */
                 $attendances =
-                    StaffAttendance::where(
-                        'staff_id',
-                        $id
-                    )
+                    $this
+                        ->attendanceQuery()
                         ->where(
-                            'branch_id',
-                            $staff->branch_id
+                            'staff_id',
+                            $id
                         )
                         ->whereYear(
                             'date',
@@ -858,7 +929,6 @@ class StaffAttendanceController extends Controller
                             $month
                         )
                         ->get();
-
 
                 /**
                  * Holiday dates বাদ
@@ -880,7 +950,6 @@ class StaffAttendanceController extends Controller
                                 ->exists();
                         }
                     );
-
 
                 $monthlyReports[] = [
 
@@ -935,15 +1004,18 @@ class StaffAttendanceController extends Controller
                 ];
             }
 
-
             return response()->json([
                 'status' => true,
+
                 'staff' =>
                     $staff,
+
                 'year' =>
                     $year,
+
                 'monthly_reports' =>
                     $monthlyReports
+
             ], 200);
 
         } catch (\Exception $e) {
@@ -958,7 +1030,6 @@ class StaffAttendanceController extends Controller
         }
     }
 
-
     /**
      * ============================================================
      * DESTROY
@@ -968,20 +1039,10 @@ class StaffAttendanceController extends Controller
     {
         try {
 
-            $authUser = request()->user();
-
-            $query = StaffAttendance::query();
-
-            // Non-manager → নিজের branch
-            if ($authUser && $authUser->role !== 'Manager') {
-
-                $query->where(
-                    'branch_id',
-                    $authUser->branch_id
-                );
-            }
-
-            $attendance = $query->find($id);
+            $attendance =
+                $this
+                    ->attendanceQuery()
+                    ->find($id);
 
             if (!$attendance) {
 
@@ -991,7 +1052,6 @@ class StaffAttendanceController extends Controller
                         'Attendance record not found.'
                 ], 404);
             }
-
 
             $attendance->delete();
 

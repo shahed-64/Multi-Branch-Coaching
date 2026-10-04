@@ -12,6 +12,7 @@ class TeachersAttendance extends Model
     protected $fillable = [
         'teacher_id',
         'shift_id',
+        'branch_id',
         'date',
         'status',
         'in_time',

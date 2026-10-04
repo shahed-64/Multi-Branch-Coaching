@@ -3,19 +3,19 @@
 namespace App\Http\Controllers;
 
 use App\Models\Subject;
+use App\Services\BranchContext;
 use Illuminate\Http\Request;
-use Illuminate\Validation\Rule;
 
 class SubjectController extends Controller
 {
     /**
      * Academic Subject module access check.
      *
-     * Manager            → All branches
-     * Branch Manager     → Own branch
-     * Admin              → Own branch
-     * Branch Admin       → Own branch
-     * Accountant         → No access
+     * Manager             → All branches / Selected branch
+     * Branch Manager      → Own branch
+     * Admin               → Own branch
+     * Branch Admin        → Own branch
+     * Accountant          → No access
      * Branch Accountant   → No access
      */
     private function authorizeAccess(Request $request)
@@ -40,6 +40,16 @@ class SubjectController extends Controller
     }
 
     /**
+     * Get current branch from central BranchContext.
+     *
+     * null = All Branches
+     */
+    private function currentBranchId(): ?int
+    {
+        return app(BranchContext::class)->id();
+    }
+
+    /**
      * Display a listing of subjects.
      */
     public function index(Request $request)
@@ -48,18 +58,18 @@ class SubjectController extends Controller
             return $response;
         }
 
-        $authUser = $request->user();
-
         $query = Subject::with([
             'branch',
             'classes',
             'classGroups',
         ]);
 
-        // Manager can see all branches.
-        // Other academic users can see only their own branch.
-        if ($authUser->role !== 'Manager') {
-            $query->where('branch_id', $authUser->branch_id);
+        $currentBranchId = $this->currentBranchId();
+
+        // Selected branch → only that branch.
+        // All Branches → no branch filter.
+        if ($currentBranchId !== null) {
+            $query->where('branch_id', $currentBranchId);
         }
 
         $subjects = $query
@@ -97,29 +107,50 @@ class SubjectController extends Controller
                 'string',
                 'max:255',
             ],
+
             'code' => [
                 'required',
                 'string',
                 'max:50',
             ],
+
             'full_mark' => [
                 'required',
                 'numeric',
                 'min:1',
             ],
+
             'branch_id' => [
                 'nullable',
                 'exists:branches,id',
             ],
         ]);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Determine Branch
-        |--------------------------------------------------------------------------
-        */
+        /**
+         * Determine Branch
+         *
+         * Selected Branch:
+         *   BranchContext is authoritative.
+         *
+         * All Branches:
+         *   Only Manager can choose branch_id.
+         */
+        $currentBranchId = $this->currentBranchId();
 
-        if ($authUser->role === 'Manager') {
+        if ($currentBranchId !== null) {
+
+            // Selected branch is authoritative.
+            $branchId = $currentBranchId;
+
+        } else {
+
+            // All Branches mode.
+            if (!$authUser || $authUser->role !== 'Manager') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Your account is not assigned to any branch.',
+                ], 422);
+            }
 
             if (!$request->branch_id) {
                 return response()->json([
@@ -129,25 +160,11 @@ class SubjectController extends Controller
             }
 
             $branchId = $request->branch_id;
-
-        } else {
-
-            if (!$authUser->branch_id) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Your account is not assigned to any branch.',
-                ], 422);
-            }
-
-            $branchId = $authUser->branch_id;
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Duplicate Code Check
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * Duplicate Code Check
+         */
         $code = strtoupper($request->code);
 
         $exists = Subject::where('branch_id', $branchId)
@@ -161,12 +178,9 @@ class SubjectController extends Controller
             ], 422);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Create Subject
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * Create Subject
+         */
         $subject = Subject::create([
             'name' => $request->name,
             'code' => $code,
@@ -190,17 +204,18 @@ class SubjectController extends Controller
             return $response;
         }
 
-        $authUser = $request->user();
+        $currentBranchId = $this->currentBranchId();
 
-        /*
-        |--------------------------------------------------------------------------
-        | Branch Access Check
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * Selected Branch:
+         * Subject must belong to selected branch.
+         *
+         * All Branches:
+         * Manager can access all.
+         */
         if (
-            $authUser->role !== 'Manager' &&
-            $subject->branch_id !== $authUser->branch_id
+            $currentBranchId !== null &&
+            $subject->branch_id !== $currentBranchId
         ) {
             return response()->json([
                 'success' => false,
@@ -237,17 +252,18 @@ class SubjectController extends Controller
             return $response;
         }
 
-        $authUser = $request->user();
+        $currentBranchId = $this->currentBranchId();
 
-        /*
-        |--------------------------------------------------------------------------
-        | Branch Access Check
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * Selected Branch:
+         * Subject must belong to selected branch.
+         *
+         * All Branches:
+         * Manager can update any subject.
+         */
         if (
-            $authUser->role !== 'Manager' &&
-            $subject->branch_id !== $authUser->branch_id
+            $currentBranchId !== null &&
+            $subject->branch_id !== $currentBranchId
         ) {
             return response()->json([
                 'success' => false,
@@ -261,11 +277,13 @@ class SubjectController extends Controller
                 'string',
                 'max:255',
             ],
+
             'code' => [
                 'required',
                 'string',
                 'max:50',
             ],
+
             'full_mark' => [
                 'required',
                 'numeric',
@@ -275,12 +293,9 @@ class SubjectController extends Controller
 
         $code = strtoupper($request->code);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Duplicate Code Check
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * Duplicate Code Check
+         */
         $exists = Subject::where('branch_id', $subject->branch_id)
             ->where('code', $code)
             ->where('id', '!=', $subject->id)
@@ -293,12 +308,9 @@ class SubjectController extends Controller
             ], 422);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Update Subject
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * Update Subject
+         */
         $subject->update([
             'name' => $request->name,
             'code' => $code,
@@ -323,17 +335,18 @@ class SubjectController extends Controller
             return $response;
         }
 
-        $authUser = $request->user();
+        $currentBranchId = $this->currentBranchId();
 
-        /*
-        |--------------------------------------------------------------------------
-        | Branch Access Check
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * Selected Branch:
+         * Subject must belong to selected branch.
+         *
+         * All Branches:
+         * Manager can delete any subject.
+         */
         if (
-            $authUser->role !== 'Manager' &&
-            $subject->branch_id !== $authUser->branch_id
+            $currentBranchId !== null &&
+            $subject->branch_id !== $currentBranchId
         ) {
             return response()->json([
                 'success' => false,

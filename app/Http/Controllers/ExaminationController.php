@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Examination;
+use App\Services\BranchContext;
 use Illuminate\Http\Request;
 
 class ExaminationController extends Controller
@@ -10,12 +11,12 @@ class ExaminationController extends Controller
     /**
      * Check Examination module access.
      *
-     * Manager            → All branches
-     * Branch Manager     → Own branch
-     * Admin              → Own branch
-     * Branch Admin       → Own branch
-     * Accountant         → No access
-     * Branch Accountant  → No access
+     * Manager             → All branches / Selected branch
+     * Branch Manager      → Own branch
+     * Admin               → Own branch
+     * Branch Admin        → Own branch
+     * Accountant          → No access
+     * Branch Accountant   → No access
      */
     private function authorizeAccess(Request $request)
     {
@@ -39,6 +40,16 @@ class ExaminationController extends Controller
     }
 
     /**
+     * Get current branch from central BranchContext.
+     *
+     * null = All Branches
+     */
+    private function currentBranchId(): ?int
+    {
+        return app(BranchContext::class)->id();
+    }
+
+    /**
      * Display a listing of the resource.
      */
     public function index(Request $request)
@@ -47,14 +58,14 @@ class ExaminationController extends Controller
             return $response;
         }
 
-        $user = $request->user();
-
         $query = Examination::orderBy('id', 'desc');
 
-        // Manager সব branch-এর examination দেখতে পারবে
-        // Branch Manager / Admin শুধু নিজের branch-এর examination দেখতে পারবে
-        if ($user->role !== 'Manager') {
-            $query->where('branch_id', $user->branch_id);
+        $currentBranchId = $this->currentBranchId();
+
+        // Selected branch → only that branch.
+        // All Branches → no branch filter.
+        if ($currentBranchId !== null) {
+            $query->where('branch_id', $currentBranchId);
         }
 
         $examination = $query->get();
@@ -91,7 +102,45 @@ class ExaminationController extends Controller
             'branch_id' => 'nullable|exists:branches,id',
         ]);
 
-        // Duplicate check branch-wise
+        /**
+         * Determine Branch
+         *
+         * Selected Branch:
+         *   BranchContext is authoritative.
+         *
+         * All Branches:
+         *   Only Manager can choose branch_id.
+         */
+        $currentBranchId = $this->currentBranchId();
+
+        if ($currentBranchId !== null) {
+
+            // Selected branch is authoritative.
+            $branchId = $currentBranchId;
+
+        } else {
+
+            // All Branches mode.
+            if (!$user || $user->role !== 'Manager') {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Your account is not assigned to any branch.',
+                ], 422);
+            }
+
+            if (!$request->branch_id) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Branch is required for Manager.',
+                ], 422);
+            }
+
+            $branchId = $request->branch_id;
+        }
+
+        /**
+         * Duplicate check branch-wise
+         */
         $existsQuery = Examination::where(
             'examination_type',
             $request->examination_type
@@ -99,42 +148,8 @@ class ExaminationController extends Controller
             ->where(
                 'examination_year',
                 $request->examination_year
-            );
-
-        /*
-        |--------------------------------------------------------------------------
-        | Determine Branch
-        |--------------------------------------------------------------------------
-        */
-
-        if ($user->role === 'Manager') {
-
-            $branchId = $request->branch_id ?? $user->branch_id;
-
-            if (!$branchId) {
-                return response()->json([
-                    'status' => false,
-                    'message' => 'Branch is required for Manager.',
-                ], 422);
-            }
-
-            $existsQuery->where('branch_id', $branchId);
-
-        } else {
-
-            // Branch Manager / Admin নিজের branch-এই create করবে
-
-            if (!$user->branch_id) {
-                return response()->json([
-                    'status' => false,
-                    'message' => 'Your account is not assigned to any branch.',
-                ], 422);
-            }
-
-            $branchId = $user->branch_id;
-
-            $existsQuery->where('branch_id', $branchId);
-        }
+            )
+            ->where('branch_id', $branchId);
 
         if ($existsQuery->exists()) {
             return response()->json([
@@ -165,13 +180,18 @@ class ExaminationController extends Controller
             return $response;
         }
 
-        $user = $request->user();
+        $currentBranchId = $this->currentBranchId();
 
-        // Manager সব branch-এর examination দেখতে পারবে
-        // অন্যরা শুধু নিজের branch-এর examination দেখতে পারবে
+        /**
+         * Selected Branch:
+         * Examination must belong to selected branch.
+         *
+         * All Branches:
+         * Manager can access all.
+         */
         if (
-            $user->role !== 'Manager' &&
-            $examination->branch_id != $user->branch_id
+            $currentBranchId !== null &&
+            $examination->branch_id != $currentBranchId
         ) {
             return response()->json([
                 'status' => false,
@@ -204,17 +224,18 @@ class ExaminationController extends Controller
             return $response;
         }
 
-        $user = $request->user();
+        $currentBranchId = $this->currentBranchId();
 
-        /*
-        |--------------------------------------------------------------------------
-        | Branch Access Check
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * Selected Branch:
+         * Examination must belong to selected branch.
+         *
+         * All Branches:
+         * Manager can update any examination.
+         */
         if (
-            $user->role !== 'Manager' &&
-            $examination->branch_id != $user->branch_id
+            $currentBranchId !== null &&
+            $examination->branch_id != $currentBranchId
         ) {
             return response()->json([
                 'status' => false,
@@ -228,7 +249,9 @@ class ExaminationController extends Controller
             'exam_mark' => 'nullable|numeric|min:0',
         ]);
 
-        // Duplicate check branch-wise
+        /**
+         * Duplicate check branch-wise
+         */
         $existsQuery = Examination::where(
             'examination_type',
             $request->examination_type
@@ -237,14 +260,11 @@ class ExaminationController extends Controller
                 'examination_year',
                 $request->examination_year
             )
-            ->where('id', '!=', $examination->id);
-
-        // Examination যে branch-এর,
-        // সেই branch-এই duplicate check হবে
-        $existsQuery->where(
-            'branch_id',
-            $examination->branch_id
-        );
+            ->where('id', '!=', $examination->id)
+            ->where(
+                'branch_id',
+                $examination->branch_id
+            );
 
         if ($existsQuery->exists()) {
             return response()->json([
@@ -276,17 +296,18 @@ class ExaminationController extends Controller
             return $response;
         }
 
-        $user = $request->user();
+        $currentBranchId = $this->currentBranchId();
 
-        /*
-        |--------------------------------------------------------------------------
-        | Branch Access Check
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * Selected Branch:
+         * Examination must belong to selected branch.
+         *
+         * All Branches:
+         * Manager can delete any examination.
+         */
         if (
-            $user->role !== 'Manager' &&
-            $examination->branch_id != $user->branch_id
+            $currentBranchId !== null &&
+            $examination->branch_id != $currentBranchId
         ) {
             return response()->json([
                 'status' => false,

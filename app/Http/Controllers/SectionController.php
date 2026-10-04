@@ -3,18 +3,29 @@
 namespace App\Http\Controllers;
 
 use App\Models\Section;
+use App\Services\BranchContext;
 use Illuminate\Http\Request;
 
 class SectionController extends Controller
 {
     /**
+     * Get current branch from BranchContext.
+     *
+     * null = Manager selected "All Branches"
+     */
+    private function currentBranchId(): ?int
+    {
+        return app(BranchContext::class)->id();
+    }
+
+    /**
      * Check whether user is allowed to access Academic Section module.
      *
-     * Manager        → All branches
-     * Branch Manager → Own branch
-     * Admin          → Own branch
-     * Branch Admin   → Own branch
-     * Accountant     → No access
+     * Manager         → All branches / selected branch
+     * Branch Manager  → Own branch
+     * Admin           → Own branch
+     * Branch Admin    → Own branch
+     * Accountant      → No access
      * Branch Accountant → No access
      */
     private function authorizeAccess(Request $request)
@@ -38,21 +49,24 @@ class SectionController extends Controller
         return null;
     }
 
-    // Section list
+    /**
+     * Section list
+     */
     public function index(Request $request)
     {
         if ($response = $this->authorizeAccess($request)) {
             return $response;
         }
 
-        $authUser = $request->user();
-
         $query = Section::with('branch')
             ->withCount('students');
 
-        // Manager can see all branches
-        if ($authUser->role !== 'Manager') {
-            $query->where('branch_id', $authUser->branch_id);
+        $currentBranchId = $this->currentBranchId();
+
+        // Selected branch → only that branch
+        // All Branches → Manager sees all
+        if ($currentBranchId !== null) {
+            $query->where('branch_id', $currentBranchId);
         }
 
         $sections = $query
@@ -65,7 +79,9 @@ class SectionController extends Controller
         ]);
     }
 
-    // New Section Create
+    /**
+     * New Section Create
+     */
     public function store(Request $request)
     {
         if ($response = $this->authorizeAccess($request)) {
@@ -79,13 +95,35 @@ class SectionController extends Controller
             'branch_id'    => 'nullable|exists:branches,id',
         ]);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Branch fix
-        |--------------------------------------------------------------------------
-        */
+        /**
+         * ----------------------------------------------------------
+         * Branch Selection
+         * ----------------------------------------------------------
+         *
+         * Selected branch from BranchContext is authoritative.
+         *
+         * Manager + All Branches:
+         * branch_id from request is required.
+         *
+         * Other users:
+         * BranchContext contains their own branch.
+         */
+        $currentBranchId = $this->currentBranchId();
 
-        if ($authUser->role === 'Manager') {
+        if ($currentBranchId !== null) {
+
+            // Selected branch is authoritative.
+            $branchId = $currentBranchId;
+
+        } else {
+
+            // All Branches is only possible for Manager.
+            if (!$authUser || $authUser->role !== 'Manager') {
+                return response()->json([
+                    'status'  => false,
+                    'message' => 'Your account is not assigned to any branch.',
+                ], 422);
+            }
 
             if (!$request->branch_id) {
                 return response()->json([
@@ -95,25 +133,13 @@ class SectionController extends Controller
             }
 
             $branchId = $request->branch_id;
-
-        } else {
-
-            if (!$authUser->branch_id) {
-                return response()->json([
-                    'status'  => false,
-                    'message' => 'Your account is not assigned to any branch.',
-                ], 422);
-            }
-
-            $branchId = $authUser->branch_id;
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Duplicate Section protection in Same branch
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * ----------------------------------------------------------
+         * Duplicate Section protection in Same branch
+         * ----------------------------------------------------------
+         */
         $exists = Section::where('branch_id', $branchId)
             ->where('section_name', $request->section_name)
             ->exists();
@@ -125,12 +151,11 @@ class SectionController extends Controller
             ], 422);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Create Section
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * ----------------------------------------------------------
+         * Create Section
+         * ----------------------------------------------------------
+         */
         $section = Section::create([
             'section_name' => $request->section_name,
             'branch_id'    => $branchId,
@@ -143,18 +168,23 @@ class SectionController extends Controller
         ], 201);
     }
 
-    // Specific Section Show
+    /**
+     * Specific Section Show
+     */
     public function show(Request $request, Section $section)
     {
         if ($response = $this->authorizeAccess($request)) {
             return $response;
         }
 
-        $authUser = $request->user();
+        $currentBranchId = $this->currentBranchId();
 
+        /**
+         * BranchContext based IDOR protection.
+         */
         if (
-            $authUser->role !== 'Manager' &&
-            $section->branch_id !== $authUser->branch_id
+            $currentBranchId !== null &&
+            $section->branch_id !== $currentBranchId
         ) {
             return response()->json([
                 'status'  => false,
@@ -171,18 +201,23 @@ class SectionController extends Controller
         ]);
     }
 
-    // Section update
+    /**
+     * Section update
+     */
     public function update(Request $request, Section $section)
     {
         if ($response = $this->authorizeAccess($request)) {
             return $response;
         }
 
-        $authUser = $request->user();
+        $currentBranchId = $this->currentBranchId();
 
+        /**
+         * BranchContext based IDOR protection.
+         */
         if (
-            $authUser->role !== 'Manager' &&
-            $section->branch_id !== $authUser->branch_id
+            $currentBranchId !== null &&
+            $section->branch_id !== $currentBranchId
         ) {
             return response()->json([
                 'status'  => false,
@@ -194,12 +229,11 @@ class SectionController extends Controller
             'section_name' => 'required|string|max:255',
         ]);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Same branch - duplicate Section protection
-        |--------------------------------------------------------------------------
-        */
-
+        /**
+         * ----------------------------------------------------------
+         * Same branch - duplicate Section protection
+         * ----------------------------------------------------------
+         */
         $exists = Section::where('branch_id', $section->branch_id)
             ->where('section_name', $request->section_name)
             ->where('id', '!=', $section->id)
@@ -223,18 +257,23 @@ class SectionController extends Controller
         ]);
     }
 
-    // Section delete
+    /**
+     * Section delete
+     */
     public function destroy(Request $request, Section $section)
     {
         if ($response = $this->authorizeAccess($request)) {
             return $response;
         }
 
-        $authUser = $request->user();
+        $currentBranchId = $this->currentBranchId();
 
+        /**
+         * BranchContext based IDOR protection.
+         */
         if (
-            $authUser->role !== 'Manager' &&
-            $section->branch_id !== $authUser->branch_id
+            $currentBranchId !== null &&
+            $section->branch_id !== $currentBranchId
         ) {
             return response()->json([
                 'status'  => false,

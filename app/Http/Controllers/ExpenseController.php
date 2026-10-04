@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Expense;
+use App\Services\BranchContext;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 
@@ -18,6 +19,26 @@ class ExpenseController extends Controller
         return Auth::user()
             ?? request()->user('sanctum')
             ?? auth('sanctum')->user();
+    }
+
+    /**
+     * --------------------------------------------------------------------------
+     * CURRENT BRANCH CONTEXT
+     * --------------------------------------------------------------------------
+     *
+     * Manager + All Branches
+     *     = null
+     *
+     * Manager + Selected Branch
+     *     = selected branch id
+     *
+     * Branch Manager / Branch Accountant
+     *     = their own branch through staff->branch_id
+     * --------------------------------------------------------------------------
+     */
+    private function currentBranchId(): ?int
+    {
+        return app(BranchContext::class)->id();
     }
 
     /**
@@ -49,20 +70,6 @@ class ExpenseController extends Controller
     /**
      * --------------------------------------------------------------------------
      * EXPENSE AUTHORIZATION
-     * --------------------------------------------------------------------------
-     *
-     * Manager
-     *      -> Full Expense access
-     *
-     * Branch Manager
-     *      -> Own branch only
-     *
-     * Branch Accountant
-     *      -> Own branch only
-     *
-     * Other roles
-     *      -> No Expense access
-     *
      * --------------------------------------------------------------------------
      */
     private function authorizeExpenseAccess()
@@ -108,18 +115,17 @@ class ExpenseController extends Controller
      * EXPENSE QUERY WITH BRANCH ISOLATION
      * --------------------------------------------------------------------------
      *
-     * Manager
-     *      -> All Branches
+     * Manager + All Branches
+     *     -> All branches
+     *
+     * Manager + Selected Branch
+     *     -> Selected branch only
      *
      * Branch Manager
-     *      -> Own Branch Only
+     *     -> Own Branch Only
      *
      * Branch Accountant
-     *      -> Own Branch Only
-     *
-     * Other roles
-     *      -> No expense data
-     *
+     *     -> Own Branch Only
      * --------------------------------------------------------------------------
      */
     private function branchExpenseQuery()
@@ -136,10 +142,26 @@ class ExpenseController extends Controller
         }
 
         /**
-         * Manager = All Branches
+         * Manager
          */
         if ($staff->role === 'Manager') {
-            return $query;
+
+            $currentBranchId = $this->currentBranchId();
+
+            /**
+             * All Branches
+             */
+            if ($currentBranchId === null) {
+                return $query;
+            }
+
+            /**
+             * Selected Branch
+             */
+            return $query->where(
+                'branch_id',
+                $currentBranchId
+            );
         }
 
         /**
@@ -155,9 +177,6 @@ class ExpenseController extends Controller
                 ]
             )
         ) {
-            /**
-             * No branch assigned
-             */
             if (empty($staff->branch_id)) {
                 return $query->whereRaw('1 = 0');
             }
@@ -170,7 +189,7 @@ class ExpenseController extends Controller
 
         /**
          * Any other role
-         * = No financial data
+         * = No expense data
          */
         return $query->whereRaw('1 = 0');
     }
@@ -192,10 +211,24 @@ class ExpenseController extends Controller
         }
 
         /**
-         * Manager = All Branches
+         * Manager
          */
         if ($staff->role === 'Manager') {
-            return true;
+
+            $currentBranchId = $this->currentBranchId();
+
+            /**
+             * All Branches
+             */
+            if ($currentBranchId === null) {
+                return true;
+            }
+
+            /**
+             * Selected Branch
+             */
+            return (int) $expense->branch_id ===
+                (int) $currentBranchId;
         }
 
         /**
@@ -212,7 +245,8 @@ class ExpenseController extends Controller
             )
         ) {
             return !empty($staff->branch_id)
-                && (int) $expense->branch_id === (int) $staff->branch_id;
+                && (int) $expense->branch_id ===
+                (int) $staff->branch_id;
         }
 
         /**
@@ -307,19 +341,34 @@ class ExpenseController extends Controller
          * BRANCH
          * ----------------------------------------------------------------------
          *
-         * Manager
-         * -> Can create expense for any branch.
+         * Manager:
+         *     All Branches selected
+         *         -> request branch_id
          *
-         * Branch Manager / Branch Accountant
-         * -> Always own branch.
+         *     Specific branch selected
+         *         -> selected context branch
          *
+         * Branch Manager / Branch Accountant:
+         *     Always own branch
          * ----------------------------------------------------------------------
          */
         if ($user->role === 'Manager') {
 
-            $branchId =
-                $request->branch_id
-                ?? $user->branch_id;
+            $currentBranchId = $this->currentBranchId();
+
+            /**
+             * Manager + selected branch
+             * = Context is authoritative
+             */
+            if ($currentBranchId !== null) {
+                $branchId = $currentBranchId;
+            } else {
+                /**
+                 * Manager + All Branches
+                 * = request branch is allowed
+                 */
+                $branchId = $request->branch_id;
+            }
 
         } elseif (
             in_array(
@@ -332,19 +381,15 @@ class ExpenseController extends Controller
         ) {
 
             /**
-             * Branch Manager / Branch Accountant
-             * -> Always own branch.
-             *
-             * Request branch_id is intentionally ignored.
+             * Always own branch.
+             * Request branch_id intentionally ignored.
              */
-            $branchId =
-                $user->branch_id;
+            $branchId = $user->branch_id;
 
         } else {
 
             /**
-             * This should normally never execute because
-             * authorizeExpenseAccess() already blocks them.
+             * Normally blocked by authorizeExpenseAccess()
              */
             return response()->json([
                 'status' => false,
@@ -518,9 +563,6 @@ class ExpenseController extends Controller
          *
          * IMPORTANT:
          * branch_id is NOT updated here.
-         *
-         * This prevents a Branch Accountant/Manager
-         * from moving an expense into another branch.
          */
         $expense->update([
             'expense_type' =>
@@ -591,12 +633,29 @@ class ExpenseController extends Controller
 
             /**
              * Manager
-             * -> All branches
              */
             if ($user->role === 'Manager') {
 
-                // All teachers
+                $currentBranchId = $this->currentBranchId();
 
+                /**
+                 * All Branches
+                 */
+                if ($currentBranchId === null) {
+                    // All teachers
+                } else {
+                    /**
+                     * Selected Branch
+                     */
+                    $query->where(
+                        'branch_id',
+                        $currentBranchId
+                    );
+                }
+
+            /**
+             * Branch Manager / Branch Accountant
+             */
             } elseif (
                 in_array(
                     $user->role,
@@ -608,15 +667,11 @@ class ExpenseController extends Controller
             ) {
 
                 /**
-                 * Branch roles
-                 * -> Own branch only
+                 * Own branch only
                  */
                 if (empty($user->branch_id)) {
-
                     $query->whereRaw('1 = 0');
-
                 } else {
-
                     $query->where(
                         'branch_id',
                         $user->branch_id
@@ -682,12 +737,29 @@ class ExpenseController extends Controller
 
         /**
          * Manager
-         * -> All branches
          */
         if ($user->role === 'Manager') {
 
-            // All branch staff
+            $currentBranchId = $this->currentBranchId();
 
+            /**
+             * All Branches
+             */
+            if ($currentBranchId === null) {
+                // All branch staff
+            } else {
+                /**
+                 * Selected Branch
+                 */
+                $query->where(
+                    'branch_id',
+                    $currentBranchId
+                );
+            }
+
+        /**
+         * Branch Manager / Branch Accountant
+         */
         } elseif (
             in_array(
                 $user->role,
@@ -699,15 +771,11 @@ class ExpenseController extends Controller
         ) {
 
             /**
-             * Branch roles
-             * -> Own branch only
+             * Own branch only
              */
             if (empty($user->branch_id)) {
-
                 $query->whereRaw('1 = 0');
-
             } else {
-
                 $query->where(
                     'branch_id',
                     $user->branch_id

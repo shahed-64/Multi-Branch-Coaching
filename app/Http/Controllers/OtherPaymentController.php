@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\OtherPayment;
 use App\Models\Student;
+use App\Services\BranchContext;
 use Illuminate\Http\Request;
 
 class OtherPaymentController extends Controller
@@ -20,18 +21,22 @@ class OtherPaymentController extends Controller
 
     /**
      * --------------------------------------------------------------------------
-     * AUTHORIZE OTHER PAYMENT ACCESS
+     * CURRENT BRANCH CONTEXT
      * --------------------------------------------------------------------------
-     * Allowed roles:
-     * Manager
-     * Branch Manager
-     * Branch Accountant
      *
-     * Blocked:
-     * Admin
-     * Branch Admin
-     * Accountant
-     * Any other role
+     * Manager + All Branches       = null
+     * Manager + Selected Branch    = branch id
+     * Other branch-restricted user = own branch through staff->branch_id
+     * --------------------------------------------------------------------------
+     */
+    private function currentBranchId(): ?int
+    {
+        return app(BranchContext::class)->id();
+    }
+
+    /**
+     * --------------------------------------------------------------------------
+     * AUTHORIZE OTHER PAYMENT ACCESS
      * --------------------------------------------------------------------------
      */
     private function authorizeAccess()
@@ -76,8 +81,6 @@ class OtherPaymentController extends Controller
      * --------------------------------------------------------------------------
      * MANAGER CHECK
      * --------------------------------------------------------------------------
-     * Manager = All Branch Access
-     * --------------------------------------------------------------------------
      */
     private function isManager(): bool
     {
@@ -105,10 +108,17 @@ class OtherPaymentController extends Controller
      * OTHER PAYMENT QUERY WITH BRANCH ISOLATION
      * --------------------------------------------------------------------------
      *
-     * Manager           -> All Branches
-     * Branch Manager    -> Own Branch
-     * Branch Accountant -> Own Branch
+     * Manager + All Branches
+     *     -> All branches
      *
+     * Manager + Selected Branch
+     *     -> Selected branch only
+     *
+     * Branch Manager
+     *     -> Own branch only
+     *
+     * Branch Accountant
+     *     -> Own branch only
      * --------------------------------------------------------------------------
      */
     private function branchOtherPaymentQuery()
@@ -122,15 +132,30 @@ class OtherPaymentController extends Controller
         }
 
         /**
-         * Manager can access all branches.
+         * Manager
          */
         if ($staff->role === 'Manager') {
-            return $query;
+
+            $currentBranchId = $this->currentBranchId();
+
+            /**
+             * All Branches
+             */
+            if ($currentBranchId === null) {
+                return $query;
+            }
+
+            /**
+             * Selected Branch
+             */
+            return $query->whereHas('student', function ($q) use ($currentBranchId) {
+                $q->where('branch_id', $currentBranchId);
+            });
         }
 
         /**
          * Branch Manager / Branch Accountant
-         * can access only their own branch.
+         * = Own Branch Only
          */
         if (
             in_array($staff->role, [
@@ -168,15 +193,27 @@ class OtherPaymentController extends Controller
 
         /**
          * Manager
-         * All branches allowed.
          */
         if ($staff->role === 'Manager') {
-            return true;
+
+            $currentBranchId = $this->currentBranchId();
+
+            /**
+             * All Branches
+             */
+            if ($currentBranchId === null) {
+                return true;
+            }
+
+            /**
+             * Selected Branch
+             */
+            return (int) $student->branch_id === (int) $currentBranchId;
         }
 
         /**
          * Branch Manager / Branch Accountant
-         * Own branch only.
+         * = Own Branch Only
          */
         if (
             in_array($staff->role, [
@@ -242,16 +279,14 @@ class OtherPaymentController extends Controller
         ]);
 
         /**
-         * ----------------------------------------------------------------------
          * Get Student
-         * ----------------------------------------------------------------------
          */
-        $student = Student::findOrFail($request->student_id);
+        $student = Student::findOrFail(
+            $request->student_id
+        );
 
         /**
-         * ----------------------------------------------------------------------
          * Branch Security
-         * ----------------------------------------------------------------------
          */
         if (!$this->studentAllowed($student)) {
             return response()->json([
@@ -261,16 +296,15 @@ class OtherPaymentController extends Controller
         }
 
         /**
-         * ----------------------------------------------------------------------
          * Create Other Payment
-         * ----------------------------------------------------------------------
          */
         $otherPayment = OtherPayment::create([
             'student_id' => $request->student_id,
             'item_name' => $request->item_name,
             'quantity' => $request->quantity,
             'price' => $request->price,
-            'total_amount' => $request->quantity * $request->price,
+            'total_amount' =>
+                $request->quantity * $request->price,
             'payment_method' => $request->payment_method,
             'payment_date' => $request->payment_date,
             'remarks' => $request->remarks,
@@ -319,8 +353,10 @@ class OtherPaymentController extends Controller
      * UPDATE OTHER PAYMENT
      * --------------------------------------------------------------------------
      */
-    public function update(Request $request, string $id)
-    {
+    public function update(
+        Request $request,
+        string $id
+    ) {
         $authorization = $this->authorizeAccess();
 
         if ($authorization) {
@@ -328,9 +364,7 @@ class OtherPaymentController extends Controller
         }
 
         /**
-         * ----------------------------------------------------------------------
          * Find Payment Within Allowed Branch
-         * ----------------------------------------------------------------------
          */
         $otherPayment = $this->branchOtherPaymentQuery()
             ->where('id', $id)
@@ -354,11 +388,11 @@ class OtherPaymentController extends Controller
         ]);
 
         /**
-         * ----------------------------------------------------------------------
          * Check New Student Branch
-         * ----------------------------------------------------------------------
          */
-        $student = Student::findOrFail($request->student_id);
+        $student = Student::findOrFail(
+            $request->student_id
+        );
 
         if (!$this->studentAllowed($student)) {
             return response()->json([
@@ -368,16 +402,15 @@ class OtherPaymentController extends Controller
         }
 
         /**
-         * ----------------------------------------------------------------------
          * Update
-         * ----------------------------------------------------------------------
          */
         $otherPayment->update([
             'student_id' => $request->student_id,
             'item_name' => $request->item_name,
             'quantity' => $request->quantity,
             'price' => $request->price,
-            'total_amount' => $request->quantity * $request->price,
+            'total_amount' =>
+                $request->quantity * $request->price,
             'payment_method' => $request->payment_method,
             'payment_date' => $request->payment_date,
             'remarks' => $request->remarks,

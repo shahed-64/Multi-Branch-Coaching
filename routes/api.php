@@ -3,10 +3,12 @@
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
-// Controllers
 use App\Http\Controllers\StafftController;
 use App\Http\Controllers\StudentController;
+use App\Http\Controllers\StudentAttendanceController;
 use App\Http\Controllers\TeacherController;
+use App\Http\Controllers\TeachersAttendanceController;
+use App\Http\Controllers\StaffAttendanceController;
 use App\Http\Controllers\ShiftController;
 use App\Http\Controllers\SectionController;
 use App\Http\Controllers\SubjectController;
@@ -24,132 +26,249 @@ use App\Http\Controllers\HolidayController;
 use App\Http\Controllers\BackupController;
 use App\Http\Controllers\BranchController;
 use App\Http\Controllers\GradingSystemController;
-
-// Middleware
 use App\Http\Middleware\PaymentAccessMiddleware;
 
-
-/*
-|--------------------------------------------------------------------------
-| Public Routes
-|--------------------------------------------------------------------------
-*/
-
-// Register
-Route::post('/register', [StafftController::class, 'store']);
-
-// Login
 Route::post('/login', [StafftController::class, 'login']);
 
+Route::get(
+    '/staff-image/{filename}',
+    [StafftController::class, 'image']
+);
 
-/*
-|--------------------------------------------------------------------------
-| Authenticated Routes
-|--------------------------------------------------------------------------
-*/
+Route::get(
+    '/student-image/{filename}',
+    [StudentController::class, 'image']
+);
 
-Route::middleware('auth:sanctum')->group(function () {
+Route::get(
+    '/teacher-image/{filename}',
+    [TeacherController::class, 'image']
+);
 
-    /*
-    |--------------------------------------------------------------------------
-    | Staff
-    |--------------------------------------------------------------------------
-    */
-
-    Route::get('/staff', [StafftController::class, 'index']);
-    Route::get('/staff/dashboard', [StafftController::class, 'dashboard']);
-    Route::get('/staff/{id}', [StafftController::class, 'show']);
-    Route::post('/staff', [StafftController::class, 'store']);
-    Route::put('/staff/{id}', [StafftController::class, 'update']);
-    Route::delete('/staff/{id}', [StafftController::class, 'destroy']);
-
+Route::middleware([
+    'auth:sanctum',
+    'branch.context',
+])->group(function () {
 
     /*
     |--------------------------------------------------------------------------
-    | Students
+    | STAFF
     |--------------------------------------------------------------------------
     */
 
-    Route::apiResource('students', StudentController::class);
+    Route::get(
+        '/staff',
+        [StafftController::class, 'index']
+    );
 
+    Route::get(
+        '/staff/dashboard',
+        [StafftController::class, 'dashboard']
+    );
 
-    /*
-    |--------------------------------------------------------------------------
-    | Teachers
-    |--------------------------------------------------------------------------
-    */
+    Route::get(
+        '/staff/{id}',
+        [StafftController::class, 'show']
+    );
 
-    Route::apiResource('teachers', TeacherController::class);
+    Route::post(
+        '/staff',
+        [StafftController::class, 'store']
+    );
 
+    Route::put(
+        '/staff/{id}',
+        [StafftController::class, 'update']
+    );
 
-    /*
-    |--------------------------------------------------------------------------
-    | Shifts
-    |--------------------------------------------------------------------------
-    */
+    Route::delete(
+        '/staff/{id}',
+        [StafftController::class, 'destroy']
+    );
 
-    Route::apiResource('shifts', ShiftController::class);
+    Route::get(
+        '/staff/dashboard/attendance-trend',
+        [StafftController::class, 'attendanceTrend']
+    );
 
-
-    /*
-    |--------------------------------------------------------------------------
-    | Sections
-    |--------------------------------------------------------------------------
-    */
-
-    Route::apiResource('sections', SectionController::class);
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | Subjects
-    |--------------------------------------------------------------------------
-    */
-
-    Route::apiResource('subjects', SubjectController::class);
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | Classes
-    |--------------------------------------------------------------------------
-    */
-
-    Route::apiResource('classes', ClssMController::class);
+    Route::get(
+        '/staff/dashboard/current-attendance',
+        [StafftController::class, 'currentAttendance']
+    );
 
 
     /*
     |--------------------------------------------------------------------------
-    | Class Groups
+    | STUDENTS
     |--------------------------------------------------------------------------
     */
 
-    Route::apiResource('class-groups', ClassGroupController::class);
+    Route::apiResource(
+        'students',
+        StudentController::class
+    );
 
 
     /*
     |--------------------------------------------------------------------------
-    | Examinations
+    | STUDENT ATTENDANCE
     |--------------------------------------------------------------------------
     */
 
-    Route::apiResource('examinations', ExaminationController::class);
+         Route::get(
+        '/student-attendance/monthly-summary',
+        [StudentAttendanceController::class, 'monthlySummary']
+         );
+         Route::get(
+        '/student-attendance/yearly-summary',
+        [StudentAttendanceController::class, 'yearlySummary']
+        );
+        Route::post(
+        '/student-attendance/scan',
+        [StudentAttendanceController::class, 'scan']
+        );
+    Route::get(
+        '/student-attendance',
+        [StudentAttendanceController::class, 'index']
+    );
+
+    Route::post(
+        '/student-attendance',
+        [StudentAttendanceController::class, 'store']
+    );
+
+    Route::get(
+        '/student-attendance/{studentAttendance}',
+        [StudentAttendanceController::class, 'show']
+    );
+
+    Route::put(
+        '/student-attendance/{studentAttendance}',
+        [StudentAttendanceController::class, 'update']
+    );
+
+    Route::delete(
+        '/student-attendance/{studentAttendance}',
+        [StudentAttendanceController::class, 'destroy']
+    );
 
 
     /*
     |--------------------------------------------------------------------------
-    | Results
+    | TEACHERS
     |--------------------------------------------------------------------------
     */
 
-    Route::apiResource('results', ResultController::class);
+    Route::apiResource(
+        'teachers',
+        TeacherController::class
+    );
 
 
     /*
     |--------------------------------------------------------------------------
-    | Final Result Configuration
+    | TEACHER ATTENDANCE
     |--------------------------------------------------------------------------
     */
+
+    Route::get(
+        '/teacher-attendances',
+        [TeachersAttendanceController::class, 'index']
+    );
+
+    Route::post(
+        '/teacher-attendances',
+        [TeachersAttendanceController::class, 'store']
+    );
+
+    Route::get(
+        '/teacher-attendances/{teachersAttendance}',
+        [TeachersAttendanceController::class, 'show']
+    );
+
+    Route::put(
+        '/teacher-attendances/{teachersAttendance}',
+        [TeachersAttendanceController::class, 'update']
+    );
+
+    Route::delete(
+        '/teacher-attendances/{teachersAttendance}',
+        [TeachersAttendanceController::class, 'destroy']
+    );
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | STAFF ATTENDANCE
+    |--------------------------------------------------------------------------
+    */
+
+    Route::get(
+        '/staff-attendances',
+        [StaffAttendanceController::class, 'index']
+    );
+
+    Route::post(
+        '/staff-attendances',
+        [StaffAttendanceController::class, 'store']
+    );
+
+    Route::get(
+        '/staff-attendances/{staffAttendance}',
+        [StaffAttendanceController::class, 'show']
+    );
+
+    Route::put(
+        '/staff-attendances/{staffAttendance}',
+        [StaffAttendanceController::class, 'update']
+    );
+
+    Route::delete(
+        '/staff-attendances/{staffAttendance}',
+        [StaffAttendanceController::class, 'destroy']
+    );
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | ACADEMIC
+    |--------------------------------------------------------------------------
+    */
+
+    Route::apiResource(
+        'shifts',
+        ShiftController::class
+    );
+
+    Route::apiResource(
+        'sections',
+        SectionController::class
+    );
+
+    Route::apiResource(
+        'subjects',
+        SubjectController::class
+    );
+
+    Route::apiResource(
+        'classes',
+        ClssMController::class
+    );
+
+    Route::apiResource(
+        'class-groups',
+        ClassGroupController::class
+    );
+
+    Route::apiResource(
+        'examinations',
+        ExaminationController::class
+    );
+
+    Route::apiResource(
+        'results',
+        ResultController::class
+    );
 
     Route::apiResource(
         'final-results',
@@ -161,19 +280,15 @@ Route::middleware('auth:sanctum')->group(function () {
         [FinalResultController::class, 'studentFinalResult']
     );
 
-
-    /*
-    |--------------------------------------------------------------------------
-    | Holidays
-    |--------------------------------------------------------------------------
-    */
-
-    Route::apiResource('holidays', HolidayController::class);
+    Route::apiResource(
+        'holidays',
+        HolidayController::class
+    );
 
 
     /*
     |--------------------------------------------------------------------------
-    | Institute Info
+    | INSTITUTE INFO
     |--------------------------------------------------------------------------
     */
 
@@ -182,58 +297,48 @@ Route::middleware('auth:sanctum')->group(function () {
         [InstituteInfoController::class, 'store']
     );
 
-    Route::put(
-        '/institute-info',
-        [InstituteInfoController::class, 'update']
-    );
-
     Route::get(
         '/institute-info',
         [InstituteInfoController::class, 'index']
     );
 
+    Route::put(
+        '/institute-info/{instituteInfo}',
+        [InstituteInfoController::class, 'update']
+    );
+
+    Route::delete(
+        '/institute-info/{instituteInfo}',
+        [InstituteInfoController::class, 'destroy']
+    );
+
 
     /*
     |--------------------------------------------------------------------------
-    | Branches
+    | BRANCHES
     |--------------------------------------------------------------------------
     */
 
-    Route::apiResource('branches', BranchController::class);
+    Route::apiResource(
+        'branches',
+        BranchController::class
+    );
 
 
     /*
     |--------------------------------------------------------------------------
-    | Account Section
-    |--------------------------------------------------------------------------
-    |
-    | Only:
-    | Manager
-    | Branch Manager
-    | Branch Accountant
-    |
+    | ACCOUNT / PAYMENT
     |--------------------------------------------------------------------------
     */
 
-    Route::middleware(PaymentAccessMiddleware::class)->group(function () {
-
-        /*
-        |--------------------------------------------------------------------------
-        | Expense Staffs
-        |--------------------------------------------------------------------------
-        */
+    Route::middleware(
+        PaymentAccessMiddleware::class
+    )->group(function () {
 
         Route::get(
             '/expense-staffs',
             [ExpenseController::class, 'getStaffs']
         );
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Payments
-        |--------------------------------------------------------------------------
-        */
 
         Route::get(
             '/payments',
@@ -275,36 +380,15 @@ Route::middleware('auth:sanctum')->group(function () {
             [PdfController::class, 'downloadReceipt']
         );
 
-
-        /*
-        |--------------------------------------------------------------------------
-        | Other Payments
-        |--------------------------------------------------------------------------
-        */
-
         Route::apiResource(
             'other-payments',
             OtherPaymentController::class
         );
 
-
-        /*
-        |--------------------------------------------------------------------------
-        | Expenses
-        |--------------------------------------------------------------------------
-        */
-
         Route::apiResource(
             'expenses',
             ExpenseController::class
         );
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Expense Teachers
-        |--------------------------------------------------------------------------
-        */
 
         Route::get(
             '/expense-teachers',
@@ -315,7 +399,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     /*
     |--------------------------------------------------------------------------
-    | Grading Systems
+    | GRADING
     |--------------------------------------------------------------------------
     */
 
@@ -327,7 +411,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     /*
     |--------------------------------------------------------------------------
-    | Backup
+    | BACKUP
     |--------------------------------------------------------------------------
     */
 
@@ -340,10 +424,13 @@ Route::middleware('auth:sanctum')->group(function () {
 
 /*
 |--------------------------------------------------------------------------
-| API User
+| AUTHENTICATED USER
 |--------------------------------------------------------------------------
 */
 
-Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
-    return $request->user();
-});
+Route::middleware('auth:sanctum')->get(
+    '/user',
+    function (Request $request) {
+        return $request->user();
+    }
+);

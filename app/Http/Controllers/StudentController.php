@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Student;
 use App\Models\Payment;
+use App\Services\BranchContext;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 use Illuminate\Support\Facades\Storage;
@@ -44,14 +45,37 @@ class StudentController extends Controller
 
     /**
      * --------------------------------------------------------------------------
-     * Check whether authenticated user can access this student.
+     * Get current branch context.
      * --------------------------------------------------------------------------
      *
      * Manager:
-     * - Can access all branches.
+     * - Selected branch from sidebar => that branch
+     * - All Branches => null
      *
-     * Other allowed roles:
-     * - Can access only their own branch.
+     * Non-Manager:
+     * - Their own assigned branch
+     *
+     * BranchContextMiddleware already determines this.
+     * --------------------------------------------------------------------------
+     */
+    private function currentBranchId(): ?int
+    {
+        return app(BranchContext::class)->id();
+    }
+
+    /**
+     * --------------------------------------------------------------------------
+     * Check whether authenticated user can access this student.
+     * --------------------------------------------------------------------------
+     *
+     * Current branch context is respected.
+     *
+     * Manager:
+     * - All Branches => can access all branches.
+     * - Selected Branch => only selected branch.
+     *
+     * Other authorized roles:
+     * - Only their current/assigned branch.
      * --------------------------------------------------------------------------
      */
     private function canAccessStudent(
@@ -66,25 +90,34 @@ class StudentController extends Controller
             return false;
         }
 
+        $currentBranchId = $this->currentBranchId();
+
         /**
-         * Manager can access all branches.
+         * All Branches context.
+         *
+         * Only Manager can have an unrestricted
+         * All Branches context.
          */
-        if ($authUser->role === 'Manager') {
+        if (
+            $currentBranchId === null
+            && $authUser->role === 'Manager'
+        ) {
             return true;
         }
 
         /**
-         * Other authorized roles must have a branch.
+         * Current branch must exist for every
+         * branch-scoped access.
          */
-        if (!$authUser->branch_id) {
+        if ($currentBranchId === null) {
             return false;
         }
 
         /**
-         * Student must belong to logged-in user's branch.
+         * Student must belong to current branch.
          */
         return $student->branch_id !== null
-            && (int) $student->branch_id === (int) $authUser->branch_id;
+            && (int) $student->branch_id === (int) $currentBranchId;
     }
 
     /**
@@ -142,11 +175,16 @@ class StudentController extends Controller
         }
 
         /**
-         * Non-Manager must have a branch.
+         * Current branch comes from central BranchContext.
+         */
+        $currentBranchId = $this->currentBranchId();
+
+        /**
+         * Non-Manager must have a branch context.
          */
         if (
             $authUser->role !== 'Manager'
-            && !$authUser->branch_id
+            && $currentBranchId === null
         ) {
             return $this->forbidden(
                 'Your account is not assigned to any branch.'
@@ -167,8 +205,7 @@ class StudentController extends Controller
             $request->get('search', '')
         );
 
-        $classId =
-            $request->get('class_id');
+        $classId = $request->get('class_id');
 
         $query = Student::with([
             'section',
@@ -193,17 +230,20 @@ class StudentController extends Controller
          * BRANCH FILTER
          * ----------------------------------------------------------------------
          *
-         * Manager:
-         * - All branches.
+         * Manager + All Branches:
+         * - currentBranchId = null
+         * - No branch filter.
          *
-         * Other authorized roles:
-         * - Own branch only.
+         * Manager + Selected Branch:
+         * - Filter by selected branch.
+         *
+         * Non-Manager:
+         * - BranchContext contains their own branch.
          */
-        if ($authUser->role !== 'Manager') {
-
+        if ($currentBranchId !== null) {
             $query->where(
                 'branch_id',
-                $authUser->branch_id
+                $currentBranchId
             );
         }
 
@@ -213,9 +253,7 @@ class StudentController extends Controller
          * ----------------------------------------------------------------------
          */
         if ($search !== '') {
-
             $query->where(function ($q) use ($search) {
-
                 $q->where(
                     'full_name',
                     'like',
@@ -240,15 +278,13 @@ class StudentController extends Controller
          * ----------------------------------------------------------------------
          */
         if (!empty($classId)) {
-
             $query->where(
                 'class_id',
                 $classId
             );
         }
 
-        $students =
-            $query->paginate($perPage);
+        $students = $query->paginate($perPage);
 
         /**
          * ----------------------------------------------------------------------
@@ -270,8 +306,7 @@ class StudentController extends Controller
             'December'
         ];
 
-        $currentMonth =
-            Carbon::now()->month;
+        $currentMonth = Carbon::now()->month;
 
         foreach ($students->items() as $student) {
 
@@ -340,11 +375,13 @@ class StudentController extends Controller
         $totalStudentsQuery =
             Student::query();
 
-        if ($authUser->role !== 'Manager') {
-
+        /**
+         * Same current branch context as the main list.
+         */
+        if ($currentBranchId !== null) {
             $totalStudentsQuery->where(
                 'branch_id',
-                $authUser->branch_id
+                $currentBranchId
             );
         }
 
@@ -456,42 +493,46 @@ class StudentController extends Controller
 
         /**
          * ----------------------------------------------------------------------
-         * DETERMINE BRANCH
+         * DETERMINE BRANCH FROM CURRENT CONTEXT
          * ----------------------------------------------------------------------
          *
-         * Manager:
-         * - Can select any branch.
+         * Manager + selected branch:
+         * - Student MUST be created in selected branch.
+         * - Frontend branch_id cannot override current context.
+         *
+         * Manager + All Branches:
+         * - Manager must select branch_id from request.
          *
          * Non-Manager:
-         * - Cannot choose branch from request.
-         * - Backend forces authenticated user's branch.
+         * - Current BranchContext is their own branch.
          */
-        if ($authUser->role === 'Manager') {
+        $currentBranchId = $this->currentBranchId();
 
-            if (!$request->branch_id) {
-                return response()->json([
-                    'status' => false,
-                    'message' =>
-                        'Branch is required for Manager.'
-                ], 422);
-            }
+        if ($currentBranchId !== null) {
 
-            $branchId =
-                $request->branch_id;
+            $branchId = $currentBranchId;
 
         } else {
 
-            if (!$authUser->branch_id) {
+            /**
+             * All Branches is only possible for Manager.
+             */
+            if ($authUser->role !== 'Manager') {
                 return $this->forbidden(
                     'Your account is not assigned to any branch.'
                 );
             }
 
-            /**
-             * Never trust branch_id sent by frontend.
-             */
+            if (!$request->branch_id) {
+                return response()->json([
+                    'status' => false,
+                    'message' =>
+                        'Branch is required when All Branches is selected.'
+                ], 422);
+            }
+
             $branchId =
-                $authUser->branch_id;
+                $request->branch_id;
         }
 
         /**
@@ -641,6 +682,7 @@ class StudentController extends Controller
          * ----------------------------------------------------------------------
          */
         $student = Student::create([
+
             'full_name' =>
                 $request->full_name,
 
@@ -728,7 +770,7 @@ class StudentController extends Controller
         }
 
         /**
-         * Role + branch access check.
+         * Current branch context access check.
          */
         if (
             !$this->canAccessStudent(
@@ -776,7 +818,7 @@ class StudentController extends Controller
         }
 
         /**
-         * Role + branch access check.
+         * Current branch context access check.
          */
         if (
             !$this->canAccessStudent(
@@ -824,7 +866,7 @@ class StudentController extends Controller
         }
 
         /**
-         * Role + branch access check.
+         * Current branch context access check.
          */
         if (
             !$this->canAccessStudent(
@@ -1037,6 +1079,7 @@ class StudentController extends Controller
          * This prevents branch manipulation.
          */
         $student->update([
+
             'full_name' =>
                 $request->full_name,
 
@@ -1112,7 +1155,7 @@ class StudentController extends Controller
         }
 
         /**
-         * Role + branch access check.
+         * Current branch context access check.
          */
         if (
             !$this->canAccessStudent(
@@ -1157,7 +1200,6 @@ class StudentController extends Controller
 
         return response()->json([
             'status' => true,
-
             'message' =>
                 'Student and related payments deleted successfully'
         ]);
@@ -1199,14 +1241,8 @@ class StudentController extends Controller
 
         /**
          * ----------------------------------------------------------------------
-         * BRANCH ACCESS CHECK
+         * CURRENT BRANCH ACCESS CHECK
          * ----------------------------------------------------------------------
-         *
-         * Manager:
-         * - All branches.
-         *
-         * Other allowed roles:
-         * - Own branch only.
          */
         if (
             !$this->canAccessStudent(

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Holiday;
+use App\Services\BranchContext;
 use Illuminate\Http\Request;
 
 class HolidayController extends Controller
@@ -42,6 +43,33 @@ class HolidayController extends Controller
     }
 
     /**
+     * Current Branch Context
+     *
+     * Manager + All Branches = null
+     * Manager + Selected Branch = branch id
+     * Non-Manager = own branch id
+     */
+    private function currentBranchId(): ?int
+    {
+        return app(BranchContext::class)->id();
+    }
+
+    /**
+     * Branch Access Check
+     */
+    private function canAccessHoliday(Holiday $holiday): bool
+    {
+        $currentBranchId = $this->currentBranchId();
+
+        // Manager + All Branches
+        if ($currentBranchId === null) {
+            return true;
+        }
+
+        return (int) $holiday->branch_id === (int) $currentBranchId;
+    }
+
+    /**
      * Display a listing of holidays.
      */
     public function index(Request $request)
@@ -50,28 +78,20 @@ class HolidayController extends Controller
             return $response;
         }
 
-        $user = $request->user();
-
         $query = Holiday::query();
 
         /**
          * Branch Filter
          *
-         * Manager → All branches
-         * Others  → Own branch
+         * All Branches → সব branch
+         * Selected Branch → শুধু selected branch
          */
-        if ($user->role !== 'Manager') {
+        $currentBranchId = $this->currentBranchId();
 
-            if (!$user->branch_id) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Your account is not assigned to any branch.'
-                ], 422);
-            }
-
+        if ($currentBranchId !== null) {
             $query->where(
                 'branch_id',
-                $user->branch_id
+                $currentBranchId
             );
         }
 
@@ -108,15 +128,11 @@ class HolidayController extends Controller
 
         $request->validate([
             'title' => 'required|string|max:255',
-
             'start_date' => 'required|date',
-
             'end_date' =>
                 'required|date|after_or_equal:start_date',
-
             'description' =>
                 'nullable|string',
-
             'branch_id' =>
                 'nullable|exists:branches,id',
         ]);
@@ -124,10 +140,24 @@ class HolidayController extends Controller
         /**
          * Branch Assignment
          *
-         * Manager → Request থেকে branch_id নেবে
-         * Others  → নিজের branch_id automatically নেবে
+         * Selected Branch → Context থেকে branch নেবে
+         * All Branches → শুধুমাত্র Manager request থেকে branch_id দিতে পারবে
          */
-        if ($user->role === 'Manager') {
+        $currentBranchId = $this->currentBranchId();
+
+        if ($currentBranchId !== null) {
+
+            $branchId = $currentBranchId;
+
+        } else {
+
+            if (!$user || $user->role !== 'Manager') {
+                return response()->json([
+                    'success' => false,
+                    'message' =>
+                        'Your account is not assigned to any branch.'
+                ], 422);
+            }
 
             if (!$request->branch_id) {
                 return response()->json([
@@ -137,17 +167,6 @@ class HolidayController extends Controller
             }
 
             $branchId = $request->branch_id;
-
-        } else {
-
-            if (!$user->branch_id) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Your account is not assigned to any branch.'
-                ], 422);
-            }
-
-            $branchId = $user->branch_id;
         }
 
         /**
@@ -156,16 +175,12 @@ class HolidayController extends Controller
         $holiday = Holiday::create([
             'branch_id' =>
                 $branchId,
-
             'title' =>
                 $request->title,
-
             'start_date' =>
                 $request->start_date,
-
             'end_date' =>
                 $request->end_date,
-
             'description' =>
                 $request->description,
         ]);
@@ -188,19 +203,13 @@ class HolidayController extends Controller
             return $response;
         }
 
-        $user = $request->user();
-
         /**
          * Branch Access Check
          *
-         * Manager → All branches
-         * Others  → Only own branch
+         * All Branches → access allowed
+         * Selected Branch → only selected branch
          */
-        if (
-            $user->role !== 'Manager' &&
-            (int) $holiday->branch_id !==
-            (int) $user->branch_id
-        ) {
+        if (!$this->canAccessHoliday($holiday)) {
             return response()->json([
                 'success' => false,
                 'message' =>

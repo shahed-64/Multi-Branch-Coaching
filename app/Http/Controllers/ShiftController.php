@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Shift;
+use App\Services\BranchContext;
 use Illuminate\Http\Request;
 
 class ShiftController extends Controller
@@ -34,6 +35,33 @@ class ShiftController extends Controller
     }
 
     /**
+     * Current Branch Context
+     *
+     * Manager + All Branches = null
+     * Manager + Selected Branch = branch id
+     * Non-Manager = own branch id
+     */
+    private function currentBranchId(): ?int
+    {
+        return app(BranchContext::class)->id();
+    }
+
+    /**
+     * Branch security check
+     */
+    private function canAccessShift(Shift $shift): bool
+    {
+        $currentBranchId = $this->currentBranchId();
+
+        // Manager + All Branches
+        if ($currentBranchId === null) {
+            return true;
+        }
+
+        return (int) $shift->branch_id === (int) $currentBranchId;
+    }
+
+    /**
      * সব শিফটের তালিকা
      */
     public function index(Request $request)
@@ -43,18 +71,19 @@ class ShiftController extends Controller
         }
 
         try {
-            $authUser = $request->user();
-
             $query = Shift::with([
                 'teachers',
                 'branch',
             ]);
 
-            // Manager → সব branch
-            if ($authUser->role !== 'Manager') {
+            $currentBranchId = $this->currentBranchId();
+
+            // Selected Branch হলে শুধু সেই branch
+            // All Branches হলে কোনো filter নয়
+            if ($currentBranchId !== null) {
                 $query->where(
                     'branch_id',
-                    $authUser->branch_id
+                    $currentBranchId
                 );
             }
 
@@ -95,12 +124,28 @@ class ShiftController extends Controller
         ]);
 
         try {
-
             /**
              * Branch determine
+             *
+             * Selected Branch থাকলে সেটাই authoritative.
+             *
+             * All Branches হলে শুধুমাত্র Manager
+             * request থেকে branch_id দিতে পারবে।
              */
+            $currentBranchId = $this->currentBranchId();
 
-            if ($authUser->role === 'Manager') {
+            if ($currentBranchId !== null) {
+
+                $branchId = $currentBranchId;
+
+            } else {
+
+                if (!$authUser || $authUser->role !== 'Manager') {
+                    return response()->json([
+                        'status' => false,
+                        'message' => 'Your account is not assigned to any branch.',
+                    ], 422);
+                }
 
                 if (!$request->branch_id) {
                     return response()->json([
@@ -110,23 +155,11 @@ class ShiftController extends Controller
                 }
 
                 $branchId = $request->branch_id;
-
-            } else {
-
-                if (!$authUser->branch_id) {
-                    return response()->json([
-                        'status' => false,
-                        'message' => 'Your account is not assigned to any branch.',
-                    ], 422);
-                }
-
-                $branchId = $authUser->branch_id;
             }
 
             /**
              * Duplicate Shift check within branch
              */
-
             $exists = Shift::where(
                     'branch_id',
                     $branchId
@@ -147,7 +180,6 @@ class ShiftController extends Controller
             /**
              * Create
              */
-
             $shift = Shift::create([
                 'name' => $request->name,
                 'start_time' => $request->start_time,
@@ -178,16 +210,10 @@ class ShiftController extends Controller
             return $response;
         }
 
-        $authUser = $request->user();
-
         /**
          * Branch security
          */
-
-        if (
-            $authUser->role !== 'Manager' &&
-            $shift->branch_id !== $authUser->branch_id
-        ) {
+        if (!$this->canAccessShift($shift)) {
             return response()->json([
                 'status' => false,
                 'message' => 'Access denied.',
@@ -195,7 +221,6 @@ class ShiftController extends Controller
         }
 
         try {
-
             $shift->load([
                 'teachers',
                 'branch',
@@ -226,16 +251,10 @@ class ShiftController extends Controller
             return $response;
         }
 
-        $authUser = $request->user();
-
         /**
          * Branch security
          */
-
-        if (
-            $authUser->role !== 'Manager' &&
-            $shift->branch_id !== $authUser->branch_id
-        ) {
+        if (!$this->canAccessShift($shift)) {
             return response()->json([
                 'status' => false,
                 'message' => 'Access denied.',
@@ -248,11 +267,9 @@ class ShiftController extends Controller
         ]);
 
         try {
-
             /**
              * Duplicate check within same branch
              */
-
             $exists = Shift::where(
                     'branch_id',
                     $shift->branch_id
@@ -277,8 +294,10 @@ class ShiftController extends Controller
 
             /**
              * Update
+             *
+             * branch_id intentionally update করা হচ্ছে না।
+             * কারণ branch context-ই branch নির্ধারণ করবে।
              */
-
             $shift->update([
                 'name' => $request->name,
                 'start_time' => $request->start_time,
@@ -310,16 +329,10 @@ class ShiftController extends Controller
             return $response;
         }
 
-        $authUser = $request->user();
-
         /**
          * Branch security
          */
-
-        if (
-            $authUser->role !== 'Manager' &&
-            $shift->branch_id !== $authUser->branch_id
-        ) {
+        if (!$this->canAccessShift($shift)) {
             return response()->json([
                 'status' => false,
                 'message' => 'Access denied.',
@@ -327,7 +340,6 @@ class ShiftController extends Controller
         }
 
         try {
-
             $shift->delete();
 
             return response()->json([

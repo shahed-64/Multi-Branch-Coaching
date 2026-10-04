@@ -4,10 +4,37 @@ namespace App\Http\Controllers;
 
 use App\Models\ClssM;
 use App\Models\Subject;
+use App\Services\BranchContext;
 use Illuminate\Http\Request;
 
 class ClssMController extends Controller
 {
+    /**
+     * Get current branch from BranchContext.
+     *
+     * null = Manager selected "All Branches"
+     */
+    private function currentBranchId(): ?int
+    {
+        return app(BranchContext::class)->id();
+    }
+
+    /**
+     * Class query according to current branch context.
+     */
+    private function classQuery()
+    {
+        $query = ClssM::query();
+
+        $branchId = $this->currentBranchId();
+
+        if ($branchId !== null) {
+            $query->where('branch_id', $branchId);
+        }
+
+        return $query;
+    }
+
     /**
      * Display a listing of the classes.
      */
@@ -26,14 +53,10 @@ class ClssMController extends Controller
             ], 403);
         }
 
-        $query = ClssM::with('subjects', 'branch');
-
-        // Manager can see all branches
-        if ($authUser && $authUser->role !== 'Manager') {
-            $query->where('branch_id', $authUser->branch_id);
-        }
-
-        $classes = $query->latest()->get();
+        $classes = $this->classQuery()
+            ->with('subjects', 'branch')
+            ->latest()
+            ->get();
 
         return response()->json([
             'status'  => true,
@@ -75,13 +98,35 @@ class ClssMController extends Controller
         ]);
 
         /**
-         * |--------------------------------------------------------------------------
-         * | Branch Selection
-         * |--------------------------------------------------------------------------
+         * ----------------------------------------------------------
+         * Branch Selection
+         * ----------------------------------------------------------
+         *
+         * Manager:
+         * - Selected branch -> BranchContext branch
+         * - All Branches -> request branch_id required
+         *
+         * Other users:
+         * - BranchContext automatically gives own branch
          */
-        if ($authUser->role === 'Manager') {
+        $currentBranchId = $this->currentBranchId();
 
-            // Manager must select a branch
+        if ($currentBranchId !== null) {
+
+            // Selected branch is authoritative.
+            $branchId = $currentBranchId;
+
+        } else {
+
+            // All Branches is only possible for Manager.
+            if (!$authUser || $authUser->role !== 'Manager') {
+                return response()->json([
+                    'status'  => false,
+                    'message' => 'Your account is not assigned to any branch.'
+                ], 422);
+            }
+
+            // Manager must provide a branch when All Branches is selected.
             if (!$request->branch_id) {
                 return response()->json([
                     'status'  => false,
@@ -90,28 +135,15 @@ class ClssMController extends Controller
             }
 
             $branchId = $request->branch_id;
-
-        } else {
-
-            // Other users can only create inside their own branch
-            if (!$authUser->branch_id) {
-                return response()->json([
-                    'status'  => false,
-                    'message' => 'Your account is not assigned to any branch.'
-                ], 422);
-            }
-
-            $branchId = $authUser->branch_id;
         }
 
         /**
-         * |--------------------------------------------------------------------------
-         * | Subject Branch Validation
-         * |--------------------------------------------------------------------------
-         * |
-         * | Selected subjects must belong to the same branch as the class.
-         * |
-         * |--------------------------------------------------------------------------
+         * ----------------------------------------------------------
+         * Subject Branch Validation
+         * ----------------------------------------------------------
+         *
+         * Selected subjects must belong to the same branch
+         * as the class.
          */
         if ($request->has('subject_ids') && !empty($request->subject_ids)) {
 
@@ -169,11 +201,12 @@ class ClssMController extends Controller
             ], 403);
         }
 
-        // Non-manager can only access own branch
+        // BranchContext based access
+        $currentBranchId = $this->currentBranchId();
+
         if (
-            $authUser &&
-            $authUser->role !== 'Manager' &&
-            $class->branch_id !== $authUser->branch_id
+            $currentBranchId !== null &&
+            $class->branch_id !== $currentBranchId
         ) {
             return response()->json([
                 'status'  => false,
@@ -207,11 +240,12 @@ class ClssMController extends Controller
             ], 403);
         }
 
-        // Non-manager can only edit own branch
+        // BranchContext based access
+        $currentBranchId = $this->currentBranchId();
+
         if (
-            $authUser &&
-            $authUser->role !== 'Manager' &&
-            $class->branch_id !== $authUser->branch_id
+            $currentBranchId !== null &&
+            $class->branch_id !== $currentBranchId
         ) {
             return response()->json([
                 'status'  => false,
@@ -245,11 +279,12 @@ class ClssMController extends Controller
             ], 403);
         }
 
-        // Non-manager can only update own branch
+        // BranchContext based access
+        $currentBranchId = $this->currentBranchId();
+
         if (
-            $authUser &&
-            $authUser->role !== 'Manager' &&
-            $class->branch_id !== $authUser->branch_id
+            $currentBranchId !== null &&
+            $class->branch_id !== $currentBranchId
         ) {
             return response()->json([
                 'status'  => false,
@@ -264,13 +299,12 @@ class ClssMController extends Controller
         ]);
 
         /**
-         * |--------------------------------------------------------------------------
-         * | Subject Branch Validation
-         * |--------------------------------------------------------------------------
-         * |
-         * | Selected subjects must belong to the same branch as the class.
-         * |
-         * |--------------------------------------------------------------------------
+         * ----------------------------------------------------------
+         * Subject Branch Validation
+         * ----------------------------------------------------------
+         *
+         * Selected subjects must belong to the same branch
+         * as the class.
          */
         if ($request->has('subject_ids') && !empty($request->subject_ids)) {
 
@@ -326,11 +360,12 @@ class ClssMController extends Controller
             ], 403);
         }
 
-        // Non-manager can only delete own branch
+        // BranchContext based access
+        $currentBranchId = $this->currentBranchId();
+
         if (
-            $authUser &&
-            $authUser->role !== 'Manager' &&
-            $class->branch_id !== $authUser->branch_id
+            $currentBranchId !== null &&
+            $class->branch_id !== $currentBranchId
         ) {
             return response()->json([
                 'status'  => false,

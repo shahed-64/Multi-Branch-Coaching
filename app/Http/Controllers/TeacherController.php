@@ -4,28 +4,18 @@ namespace App\Http\Controllers;
 
 use App\Models\Teacher;
 use App\Models\Shift;
+use App\Services\BranchContext;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 class TeacherController extends Controller
 {
-    /**
-     * --------------------------------------------------------------------------
-     * Check whether authenticated user can access Teacher module.
-     * --------------------------------------------------------------------------
-     *
-     * Allowed:
-     * - Manager
-     * - Branch Manager
-     * - Admin
-     * - Branch Admin
-     *
-     * Not allowed:
-     * - Accountant
-     * - Branch Accountant
-     * --------------------------------------------------------------------------
-     */
+    private function currentBranchId(): ?int
+    {
+        return app(BranchContext::class)->id();
+    }
+
     private function canAccessModule($authUser): bool
     {
         if (!$authUser) {
@@ -40,18 +30,6 @@ class TeacherController extends Controller
         ]);
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * Check whether authenticated user can access this teacher.
-     * --------------------------------------------------------------------------
-     *
-     * Manager:
-     * - All branches
-     *
-     * Other allowed roles:
-     * - Own branch only
-     * --------------------------------------------------------------------------
-     */
     private function canAccessTeacher(
         $authUser,
         Teacher $teacher
@@ -64,32 +42,23 @@ class TeacherController extends Controller
             return false;
         }
 
-        /**
-         * Manager can access all branches.
-         */
-        if ($authUser->role === 'Manager') {
+        $currentBranchId = $this->currentBranchId();
+
+        if (
+            $authUser->role === 'Manager'
+            && $currentBranchId === null
+        ) {
             return true;
         }
 
-        /**
-         * Other allowed roles must have a branch.
-         */
-        if (!$authUser->branch_id) {
+        if ($currentBranchId === null) {
             return false;
         }
 
-        /**
-         * Teacher must belong to logged-in user's branch.
-         */
         return $teacher->branch_id !== null
-            && (int) $teacher->branch_id === (int) $authUser->branch_id;
+            && (int) $teacher->branch_id === (int) $currentBranchId;
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * Forbidden response.
-     * --------------------------------------------------------------------------
-     */
     private function forbidden(
         $message = 'Access denied.'
     ) {
@@ -99,11 +68,6 @@ class TeacherController extends Controller
         ], 403);
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * Authentication response.
-     * --------------------------------------------------------------------------
-     */
     private function unauthenticated()
     {
         return response()->json([
@@ -112,11 +76,6 @@ class TeacherController extends Controller
         ], 401);
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * Verify all selected shifts belong to the given branch.
-     * --------------------------------------------------------------------------
-     */
     private function validateShiftBranch(
         $shiftIds,
         $branchId
@@ -134,7 +93,6 @@ class TeacherController extends Controller
             $shiftIds
         )
             ->where(function ($query) use ($branchId) {
-
                 $query
                     ->whereNull('branch_id')
                     ->orWhere(
@@ -149,52 +107,65 @@ class TeacherController extends Controller
             return response()->json([
                 'status' => false,
                 'message' =>
-                    'One or more selected shifts do not belong to the selected branch.'
+                    'One or more selected shifts do not belong to the selected branch.',
             ], 422);
         }
 
         return null;
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * ============================
-     * TEACHER LIST
-     * ============================
-     * --------------------------------------------------------------------------
-     */
+    /*
+    |--------------------------------------------------------------------------
+    | TEACHER IMAGE
+    |--------------------------------------------------------------------------
+    */
+
+    public function image($filename)
+    {
+        $path = storage_path(
+            'app/public/teachers/' . $filename
+        );
+
+        if (!file_exists($path)) {
+            abort(404);
+        }
+
+        return response()->file($path, [
+            'Access-Control-Allow-Origin' => 'http://localhost:5173',
+            'Access-Control-Allow-Methods' => 'GET, OPTIONS',
+            'Access-Control-Allow-Headers' => 'Content-Type',
+        ]);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | TEACHER LIST
+    |--------------------------------------------------------------------------
+    */
+
     public function index(Request $request)
     {
         $authUser = $request->user();
 
-        /**
-         * Authentication check.
-         */
         if (!$authUser) {
             return $this->unauthenticated();
         }
 
-        /**
-         * Role authorization.
-         */
         if (!$this->canAccessModule($authUser)) {
             return $this->forbidden(
                 'You are not authorized to access teachers.'
             );
         }
 
-        /**
-         * Non-Manager roles must have a branch.
-         */
+        $currentBranchId = $this->currentBranchId();
+
         if (
             $authUser->role !== 'Manager'
-            && !$authUser->branch_id
+            && $currentBranchId === null
         ) {
-            return response()->json([
-                'status' => false,
-                'message' =>
-                    'Your account is not assigned to any branch.'
-            ], 403);
+            return $this->forbidden(
+                'Your account is not assigned to any branch.'
+            );
         }
 
         $perPage = (int) $request->input(
@@ -209,39 +180,20 @@ class TeacherController extends Controller
 
         $query = Teacher::with([
             'shifts',
-            'branch'
+            'branch',
         ]);
 
-        /**
-         * ----------------------------------------------------------------------
-         * Branch Isolation
-         * ----------------------------------------------------------------------
-         *
-         * Manager -> All branches
-         *
-         * Other allowed roles -> Own branch only
-         */
-        if ($authUser->role !== 'Manager') {
-
+        if ($currentBranchId !== null) {
             $query->where(
                 'branch_id',
-                $authUser->branch_id
+                $currentBranchId
             );
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * Search
-         * ----------------------------------------------------------------------
-         */
         if ($request->filled('search')) {
-
-            $search = $request->input(
-                'search'
-            );
+            $search = $request->input('search');
 
             $query->where(function ($q) use ($search) {
-
                 $q->where(
                     'full_name',
                     'like',
@@ -260,36 +212,10 @@ class TeacherController extends Controller
             });
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * Department Filter
-         * ----------------------------------------------------------------------
-         */
         if ($request->filled('department')) {
-
             $query->where(
                 'department',
                 $request->input('department')
-            );
-        }
-
-        /**
-         * ----------------------------------------------------------------------
-         * Branch Filter
-         * ----------------------------------------------------------------------
-         *
-         * Only Manager can manually filter branch.
-         * Non-manager branch is always forced above.
-         */
-        if (
-            $request->filled('branch_id')
-            &&
-            $authUser->role === 'Manager'
-        ) {
-
-            $query->where(
-                'branch_id',
-                $request->input('branch_id')
             );
         }
 
@@ -297,41 +223,35 @@ class TeacherController extends Controller
             ->latest()
             ->paginate($perPage);
 
-        /**
-         * ----------------------------------------------------------------------
-         * Teacher Image URL
-         * ----------------------------------------------------------------------
-         */
         $teachers
             ->getCollection()
-            ->transform(
-                function ($teacher) {
+            ->transform(function ($teacher) {
 
-                    if (
+                if (
+                    $teacher->image
+                    &&
+                    !str_starts_with(
+                        $teacher->image,
+                        'http'
+                    )
+                ) {
+                    $filename = basename(
                         $teacher->image
-                        &&
-                        !str_starts_with(
-                            $teacher->image,
-                            'http'
-                        )
-                    ) {
-                        $teacher->image =
-                            asset(
-                                'storage/' .
-                                $teacher->image
-                            );
-                    }
+                    );
 
-                    return $teacher;
+                    $teacher->image =
+                        url(
+                            '/api/teacher-image/' .
+                            $filename
+                        );
                 }
-            );
+
+                return $teacher;
+            });
 
         return response()->json([
             'status' => true,
-
-            'data' =>
-                $teachers->items(),
-
+            'data' => $teachers->items(),
             'pagination' => [
                 'current_page' =>
                     $teachers->currentPage(),
@@ -354,50 +274,37 @@ class TeacherController extends Controller
         ], 200);
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * ============================
-     * CREATE TEACHER
-     * ============================
-     * --------------------------------------------------------------------------
-     */
+    /*
+    |--------------------------------------------------------------------------
+    | CREATE TEACHER
+    |--------------------------------------------------------------------------
+    */
+
     public function store(Request $request)
     {
         $authUser = $request->user();
 
-        /**
-         * Authentication check.
-         */
         if (!$authUser) {
             return $this->unauthenticated();
         }
 
-        /**
-         * Role authorization.
-         */
         if (!$this->canAccessModule($authUser)) {
             return $this->forbidden(
                 'You are not authorized to create teachers.'
             );
         }
 
-        /**
-         * Non-Manager must have branch.
-         */
+        $currentBranchId = $this->currentBranchId();
+
         if (
             $authUser->role !== 'Manager'
-            && !$authUser->branch_id
+            && $currentBranchId === null
         ) {
-            return response()->json([
-                'status' => false,
-                'message' =>
-                    'Your account is not assigned to any branch.'
-            ], 403);
+            return $this->forbidden(
+                'Your account is not assigned to any branch.'
+            );
         }
 
-        /**
-         * Validation.
-         */
         $request->validate([
             'full_name' =>
                 'required|string|max:255',
@@ -436,41 +343,26 @@ class TeacherController extends Controller
                 'exists:shifts,id',
         ]);
 
-        /**
-         * ----------------------------------------------------------------------
-         * Branch Assignment
-         * ----------------------------------------------------------------------
-         *
-         * Manager:
-         *     Uses selected branch.
-         *
-         * Non-manager:
-         *     Backend forces logged-in user's branch.
-         */
-        if ($authUser->role !== 'Manager') {
-
-            $branchId =
-                $authUser->branch_id;
-
+        if ($currentBranchId !== null) {
+            $branchId = $currentBranchId;
         } else {
+            if ($authUser->role !== 'Manager') {
+                return $this->forbidden(
+                    'Your account is not assigned to any branch.'
+                );
+            }
 
-            $branchId =
-                $request->branch_id;
-
-            if (!$branchId) {
+            if (!$request->branch_id) {
                 return response()->json([
                     'status' => false,
                     'message' =>
-                        'Branch is required.'
+                        'Branch is required when All Branches is selected.',
                 ], 422);
             }
+
+            $branchId = $request->branch_id;
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * Verify Shift Branch
-         * ----------------------------------------------------------------------
-         */
         $shiftError =
             $this->validateShiftBranch(
                 $request->shift_ids ?? [],
@@ -481,17 +373,10 @@ class TeacherController extends Controller
             return $shiftError;
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * Upload Image
-         * ----------------------------------------------------------------------
-         */
         $imagePath = null;
 
         if ($request->hasFile('image')) {
-
-            $file =
-                $request->file('image');
+            $file = $request->file('image');
 
             $filename =
                 time() .
@@ -508,11 +393,6 @@ class TeacherController extends Controller
                 );
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * Generate Teacher ID
-         * ----------------------------------------------------------------------
-         */
         $lastTeacher =
             Teacher::latest('id')->first();
 
@@ -521,7 +401,6 @@ class TeacherController extends Controller
             &&
             $lastTeacher->teacher_id
         ) {
-
             $lastNumber =
                 (int) str_replace(
                     'TCH-',
@@ -532,18 +411,11 @@ class TeacherController extends Controller
             $teacherId =
                 'TCH-' .
                 ($lastNumber + 1);
-
         } else {
-
             $teacherId =
                 'TCH-1001';
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * Create Teacher
-         * ----------------------------------------------------------------------
-         */
         $teacher = Teacher::create([
             'teacher_id' =>
                 $teacherId,
@@ -580,74 +452,52 @@ class TeacherController extends Controller
                 $branchId,
         ]);
 
-        /**
-         * ----------------------------------------------------------------------
-         * Assign Shifts
-         * ----------------------------------------------------------------------
-         */
         $teacher->shifts()->sync(
             $request->shift_ids ?? []
         );
 
-        /**
-         * ----------------------------------------------------------------------
-         * Load Relations
-         * ----------------------------------------------------------------------
-         */
         $teacher->load([
             'shifts',
-            'branch'
+            'branch',
         ]);
 
-        /**
-         * ----------------------------------------------------------------------
-         * Image URL
-         * ----------------------------------------------------------------------
-         */
         if ($teacher->image) {
+            $filename = basename(
+                $teacher->image
+            );
 
             $teacher->image =
-                asset(
-                    'storage/' .
-                    $teacher->image
+                url(
+                    '/api/teacher-image/' .
+                    $filename
                 );
         }
 
         return response()->json([
             'status' => true,
-
             'message' =>
                 'Teacher added successfully!',
-
             'data' =>
                 $teacher,
-
         ], 201);
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * ============================
-     * SHOW TEACHER
-     * ============================
-     * --------------------------------------------------------------------------
-     */
+    /*
+    |--------------------------------------------------------------------------
+    | SHOW TEACHER
+    |--------------------------------------------------------------------------
+    */
+
     public function show(
         Request $request,
         Teacher $teacher
     ) {
         $authUser = $request->user();
 
-        /**
-         * Authentication check.
-         */
         if (!$authUser) {
             return $this->unauthenticated();
         }
 
-        /**
-         * Branch + role access check.
-         */
         if (
             !$this->canAccessTeacher(
                 $authUser,
@@ -661,12 +511,9 @@ class TeacherController extends Controller
 
         $teacher->load([
             'shifts',
-            'branch'
+            'branch',
         ]);
 
-        /**
-         * Image URL.
-         */
         if (
             $teacher->image
             &&
@@ -675,10 +522,14 @@ class TeacherController extends Controller
                 'http'
             )
         ) {
+            $filename = basename(
+                $teacher->image
+            );
+
             $teacher->image =
-                asset(
-                    'storage/' .
-                    $teacher->image
+                url(
+                    '/api/teacher-image/' .
+                    $filename
                 );
         }
 
@@ -688,29 +539,22 @@ class TeacherController extends Controller
         ], 200);
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * ============================
-     * UPDATE TEACHER
-     * ============================
-     * --------------------------------------------------------------------------
-     */
+    /*
+    |--------------------------------------------------------------------------
+    | UPDATE TEACHER
+    |--------------------------------------------------------------------------
+    */
+
     public function update(
         Request $request,
         Teacher $teacher
     ) {
         $authUser = $request->user();
 
-        /**
-         * Authentication check.
-         */
         if (!$authUser) {
             return $this->unauthenticated();
         }
 
-        /**
-         * Role + branch access check.
-         */
         if (
             !$this->canAccessTeacher(
                 $authUser,
@@ -722,9 +566,6 @@ class TeacherController extends Controller
             );
         }
 
-        /**
-         * Validation.
-         */
         $request->validate([
             'full_name' =>
                 'required|string|max:255',
@@ -767,47 +608,17 @@ class TeacherController extends Controller
                 'exists:shifts,id',
         ]);
 
-        /**
-         * ----------------------------------------------------------------------
-         * Branch Assignment
-         * ----------------------------------------------------------------------
-         *
-         * Manager:
-         *     Can change teacher branch.
-         *
-         * Non-manager:
-         *     Teacher remains in logged-in user's branch.
-         */
-        if ($authUser->role !== 'Manager') {
+        $currentBranchId =
+            $this->currentBranchId();
 
-            $branchId =
-                $authUser->branch_id;
-
-            if (!$branchId) {
-                return response()->json([
-                    'status' => false,
-                    'message' =>
-                        'Your account is not assigned to any branch.'
-                ], 403);
-            }
-
-            /**
-             * Extra protection:
-             *
-             * Existing teacher must already belong
-             * to authenticated user's branch.
-             */
-            if (
-                (int) $teacher->branch_id
-                !==
-                (int) $authUser->branch_id
-            ) {
+        if ($currentBranchId !== null) {
+            $branchId = $currentBranchId;
+        } else {
+            if ($authUser->role !== 'Manager') {
                 return $this->forbidden(
-                    'You are not authorized to update this teacher.'
+                    'Your account is not assigned to any branch.'
                 );
             }
-
-        } else {
 
             $branchId =
                 $request->branch_id
@@ -818,16 +629,11 @@ class TeacherController extends Controller
                 return response()->json([
                     'status' => false,
                     'message' =>
-                        'Branch is required.'
+                        'Branch is required.',
                 ], 422);
             }
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * Verify Shift Branch
-         * ----------------------------------------------------------------------
-         */
         $shiftError =
             $this->validateShiftBranch(
                 $request->shift_ids ?? [],
@@ -838,11 +644,6 @@ class TeacherController extends Controller
             return $shiftError;
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * Image Handling
-         * ----------------------------------------------------------------------
-         */
         $imagePath =
             $teacher->image;
 
@@ -878,11 +679,6 @@ class TeacherController extends Controller
                 );
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * Update Teacher
-         * ----------------------------------------------------------------------
-         */
         $teacher->update([
             'full_name' =>
                 $request->full_name,
@@ -921,30 +717,15 @@ class TeacherController extends Controller
                 $branchId,
         ]);
 
-        /**
-         * ----------------------------------------------------------------------
-         * Update Shifts
-         * ----------------------------------------------------------------------
-         */
         $teacher->shifts()->sync(
             $request->shift_ids ?? []
         );
 
-        /**
-         * ----------------------------------------------------------------------
-         * Reload Relations
-         * ----------------------------------------------------------------------
-         */
         $teacher->load([
             'shifts',
-            'branch'
+            'branch',
         ]);
 
-        /**
-         * ----------------------------------------------------------------------
-         * Image URL
-         * ----------------------------------------------------------------------
-         */
         if (
             $teacher->image
             &&
@@ -953,48 +734,42 @@ class TeacherController extends Controller
                 'http'
             )
         ) {
+            $filename = basename(
+                $teacher->image
+            );
+
             $teacher->image =
-                asset(
-                    'storage/' .
-                    $teacher->image
+                url(
+                    '/api/teacher-image/' .
+                    $filename
                 );
         }
 
         return response()->json([
             'status' => true,
-
             'message' =>
                 'Teacher updated successfully!',
-
             'data' =>
                 $teacher,
-
         ], 200);
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * ============================
-     * DELETE TEACHER
-     * ============================
-     * --------------------------------------------------------------------------
-     */
+    /*
+    |--------------------------------------------------------------------------
+    | DELETE TEACHER
+    |--------------------------------------------------------------------------
+    */
+
     public function destroy(
         Request $request,
         Teacher $teacher
     ) {
         $authUser = $request->user();
 
-        /**
-         * Authentication check.
-         */
         if (!$authUser) {
             return $this->unauthenticated();
         }
 
-        /**
-         * Role + branch access check.
-         */
         if (
             !$this->canAccessTeacher(
                 $authUser,
@@ -1006,9 +781,6 @@ class TeacherController extends Controller
             );
         }
 
-        /**
-         * Delete Image.
-         */
         if (
             $teacher->image
             &&
@@ -1021,21 +793,14 @@ class TeacherController extends Controller
             );
         }
 
-        /**
-         * Remove Teacher Shifts.
-         */
         $teacher->shifts()->detach();
 
-        /**
-         * Delete Teacher.
-         */
         $teacher->delete();
 
         return response()->json([
             'status' => true,
-
             'message' =>
-                'Teacher deleted successfully!'
+                'Teacher deleted successfully!',
         ], 200);
     }
 }
