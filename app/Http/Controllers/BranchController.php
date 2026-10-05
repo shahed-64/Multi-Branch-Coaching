@@ -25,6 +25,14 @@ class BranchController extends Controller
      */
     public function store(Request $request)
     {
+        // Only Manager can create a branch
+        if ($request->user()?->role !== 'Manager') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthorized. Only Manager can create a branch.',
+            ], 403);
+        }
+
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'code' => 'required|string|max:100|unique:branches,code',
@@ -59,6 +67,14 @@ class BranchController extends Controller
      */
     public function update(Request $request, Branch $branch)
     {
+        // Only Manager can update a branch
+        if ($request->user()?->role !== 'Manager') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthorized. Only Manager can update a branch.',
+            ], 403);
+        }
+
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'code' => 'required|string|max:100|unique:branches,code,' . $branch->id,
@@ -80,8 +96,16 @@ class BranchController extends Controller
     /**
      * Remove the specified branch.
      */
-    public function destroy(Branch $branch)
+    public function destroy(Request $request, Branch $branch)
     {
+        // Only Manager can delete a branch
+        if ($request->user()?->role !== 'Manager') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthorized. Only Manager can delete a branch.',
+            ], 403);
+        }
+
         $branch->delete();
 
         return response()->json([
