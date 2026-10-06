@@ -415,9 +415,9 @@ Route::middleware([
     |--------------------------------------------------------------------------
     */
 
-    Route::get(
-        '/backup',
-        [BackupController::class, 'backup']
+    Route::post(
+    '/backup',
+    [BackupController::class, 'takeBackup']
     );
 });
 
