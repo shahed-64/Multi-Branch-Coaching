@@ -2,17 +2,18 @@
 
 namespace App\Http\Controllers;
 
+
 use App\Models\OtherPayment;
 use App\Models\Student;
+use App\Models\StudentSession;
 use App\Services\BranchContext;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 
 class OtherPaymentController extends Controller
 {
     /**
-     * --------------------------------------------------------------------------
-     * CURRENT LOGGED-IN STAFF
-     * --------------------------------------------------------------------------
+     * Current logged-in staff.
      */
     private function staff()
     {
@@ -20,14 +21,11 @@ class OtherPaymentController extends Controller
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * CURRENT BRANCH CONTEXT
-     * --------------------------------------------------------------------------
+     * Current branch context.
      *
-     * Manager + All Branches       = null
-     * Manager + Selected Branch    = branch id
-     * Other branch-restricted user = own branch through staff->branch_id
-     * --------------------------------------------------------------------------
+     * Manager + All Branches = null
+     * Manager + Selected Branch = branch ID
+     * Other branch-restricted users = selected own branch
      */
     private function currentBranchId(): ?int
     {
@@ -35,9 +33,7 @@ class OtherPaymentController extends Controller
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * AUTHORIZE OTHER PAYMENT ACCESS
-     * --------------------------------------------------------------------------
+     * Authorize Other Payment access.
      */
     private function authorizeAccess()
     {
@@ -65,8 +61,7 @@ class OtherPaymentController extends Controller
             in_array($staff->role, [
                 'Branch Manager',
                 'Branch Accountant',
-            ])
-            && empty($staff->branch_id)
+            ]) && empty($staff->branch_id)
         ) {
             return response()->json([
                 'status' => false,
@@ -78,110 +73,7 @@ class OtherPaymentController extends Controller
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * MANAGER CHECK
-     * --------------------------------------------------------------------------
-     */
-    private function isManager(): bool
-    {
-        return $this->staff()?->role === 'Manager';
-    }
-
-    /**
-     * --------------------------------------------------------------------------
-     * BRANCH RESTRICTED ROLES
-     * --------------------------------------------------------------------------
-     */
-    private function isBranchRestricted(): bool
-    {
-        return in_array(
-            $this->staff()?->role,
-            [
-                'Branch Manager',
-                'Branch Accountant',
-            ]
-        );
-    }
-
-    /**
-     * --------------------------------------------------------------------------
-     * OTHER PAYMENT QUERY WITH BRANCH ISOLATION
-     * --------------------------------------------------------------------------
-     *
-     * Manager + All Branches
-     *     -> All branches
-     *
-     * Manager + Selected Branch
-     *     -> Selected branch only
-     *
-     * Branch Manager
-     *     -> Own branch only
-     *
-     * Branch Accountant
-     *     -> Own branch only
-     * --------------------------------------------------------------------------
-     */
-    private function branchOtherPaymentQuery()
-    {
-        $query = OtherPayment::query();
-
-        $staff = $this->staff();
-
-        if (!$staff) {
-            return $query->whereRaw('1 = 0');
-        }
-
-        /**
-         * Manager
-         */
-        if ($staff->role === 'Manager') {
-
-            $currentBranchId = $this->currentBranchId();
-
-            /**
-             * All Branches
-             */
-            if ($currentBranchId === null) {
-                return $query;
-            }
-
-            /**
-             * Selected Branch
-             */
-            return $query->whereHas('student', function ($q) use ($currentBranchId) {
-                $q->where('branch_id', $currentBranchId);
-            });
-        }
-
-        /**
-         * Branch Manager / Branch Accountant
-         * = Own Branch Only
-         */
-        if (
-            in_array($staff->role, [
-                'Branch Manager',
-                'Branch Accountant',
-            ])
-        ) {
-            if (empty($staff->branch_id)) {
-                return $query->whereRaw('1 = 0');
-            }
-
-            return $query->whereHas('student', function ($q) use ($staff) {
-                $q->where('branch_id', $staff->branch_id);
-            });
-        }
-
-        /**
-         * Any unauthorized role gets no data.
-         */
-        return $query->whereRaw('1 = 0');
-    }
-
-    /**
-     * --------------------------------------------------------------------------
-     * CHECK STUDENT BELONGS TO STAFF'S ALLOWED BRANCH
-     * --------------------------------------------------------------------------
+     * Check whether the student belongs to an allowed branch.
      */
     private function studentAllowed(Student $student): bool
     {
@@ -191,50 +83,129 @@ class OtherPaymentController extends Controller
             return false;
         }
 
-        /**
-         * Manager
-         */
         if ($staff->role === 'Manager') {
+            $branchId = $this->currentBranchId();
 
-            $currentBranchId = $this->currentBranchId();
-
-            /**
-             * All Branches
-             */
-            if ($currentBranchId === null) {
-                return true;
-            }
-
-            /**
-             * Selected Branch
-             */
-            return (int) $student->branch_id === (int) $currentBranchId;
+            return $branchId === null
+                || (int) $student->branch_id === (int) $branchId;
         }
 
-        /**
-         * Branch Manager / Branch Accountant
-         * = Own Branch Only
-         */
-        if (
-            in_array($staff->role, [
-                'Branch Manager',
-                'Branch Accountant',
-            ])
-        ) {
+        if (in_array($staff->role, [
+            'Branch Manager',
+            'Branch Accountant',
+        ])) {
             return !empty($staff->branch_id)
                 && (int) $student->branch_id === (int) $staff->branch_id;
         }
 
-        /**
-         * All other roles are blocked.
-         */
         return false;
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * DISPLAY ALL OTHER PAYMENTS
-     * --------------------------------------------------------------------------
+     * Other Payment query with branch isolation.
+     */
+    private function branchOtherPaymentQuery()
+    {
+        $query = OtherPayment::query();
+        $staff = $this->staff();
+
+        if (!$staff) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        if ($staff->role === 'Manager') {
+            $branchId = $this->currentBranchId();
+
+            if ($branchId === null) {
+                return $query;
+            }
+
+            return $query->whereHas('student', function ($q) use ($branchId) {
+                $q->where('branch_id', $branchId);
+            });
+        }
+
+        if (in_array($staff->role, [
+            'Branch Manager',
+            'Branch Accountant',
+        ])) {
+            if (empty($staff->branch_id)) {
+                return $query->whereRaw('1 = 0');
+            }
+
+            return $query->whereHas('student', function ($q) use ($staff) {
+                $q->where('branch_id', $staff->branch_id);
+            });
+        }
+
+        return $query->whereRaw('1 = 0');
+    }
+
+    /**
+     * Validate that the selected session belongs to the student
+     * and is within the user's allowed branch.
+     */
+    private function validateStudentSession(
+        int $studentId,
+        int $studentSessionId
+    ): StudentSession {
+        $student = Student::findOrFail($studentId);
+
+        if (!$this->studentAllowed($student)) {
+            abort(response()->json([
+                'status' => false,
+                'message' => 'You cannot access this student.',
+            ], 403));
+        }
+
+        $session = StudentSession::query()
+            ->where('id', $studentSessionId)
+            ->where('student_id', $studentId)
+            ->first();
+
+        if (!$session) {
+            throw ValidationException::withMessages([
+                'student_session_id' =>
+                    'The selected session does not belong to this student.',
+            ]);
+        }
+
+        if ((int) $session->branch_id !== (int) $student->branch_id) {
+            throw ValidationException::withMessages([
+                'student_session_id' =>
+                    'The selected session does not belong to the student branch.',
+            ]);
+        }
+
+        if (
+            $this->staff()->role !== 'Manager'
+            && (int) $session->branch_id !== (int) $this->staff()->branch_id
+        ) {
+            abort(response()->json([
+                'status' => false,
+                'message' => 'You cannot access a session from another branch.',
+            ], 403));
+        }
+
+        if ($this->staff()->role === 'Manager') {
+            $branchId = $this->currentBranchId();
+
+            if (
+                $branchId !== null
+                && (int) $session->branch_id !== (int) $branchId
+            ) {
+                abort(response()->json([
+                    'status' => false,
+                    'message' => 'The selected session is outside the current branch.',
+                ], 403));
+            }
+        }
+
+        return $session;
+    }
+
+    /**
+     * DISPLAY ALL OTHER PAYMENTS.
      */
     public function index()
     {
@@ -245,7 +216,14 @@ class OtherPaymentController extends Controller
         }
 
         $otherPayments = $this->branchOtherPaymentQuery()
-            ->with('student')
+            ->with([
+                'student',
+                'studentSession.academicSession',
+                'studentSession.classInfo',
+                'studentSession.section',
+                'studentSession.shift',
+                'studentSession.classGroup',
+            ])
             ->latest()
             ->get();
 
@@ -256,9 +234,7 @@ class OtherPaymentController extends Controller
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * STORE OTHER PAYMENT
-     * --------------------------------------------------------------------------
+     * STORE OTHER PAYMENT.
      */
     public function store(Request $request)
     {
@@ -268,8 +244,9 @@ class OtherPaymentController extends Controller
             return $authorization;
         }
 
-        $request->validate([
-            'student_id' => 'required|exists:students,id',
+        $validated = $request->validate([
+            'student_id' => 'required|integer|exists:students,id',
+            'student_session_id' => 'required|integer|exists:student_sessions,id',
             'item_name' => 'required|string|max:255',
             'quantity' => 'required|integer|min:1',
             'price' => 'required|numeric|min:0',
@@ -278,16 +255,8 @@ class OtherPaymentController extends Controller
             'remarks' => 'nullable|string',
         ]);
 
-        /**
-         * Get Student
-         */
-        $student = Student::findOrFail(
-            $request->student_id
-        );
+        $student = Student::findOrFail($validated['student_id']);
 
-        /**
-         * Branch Security
-         */
         if (!$this->studentAllowed($student)) {
             return response()->json([
                 'status' => false,
@@ -295,32 +264,40 @@ class OtherPaymentController extends Controller
             ], 403);
         }
 
-        /**
-         * Create Other Payment
-         */
+        $this->validateStudentSession(
+            (int) $validated['student_id'],
+            (int) $validated['student_session_id']
+        );
+
         $otherPayment = OtherPayment::create([
-            'student_id' => $request->student_id,
-            'item_name' => $request->item_name,
-            'quantity' => $request->quantity,
-            'price' => $request->price,
+            'student_id' => $validated['student_id'],
+            'student_session_id' => $validated['student_session_id'],
+            'item_name' => $validated['item_name'],
+            'quantity' => $validated['quantity'],
+            'price' => $validated['price'],
             'total_amount' =>
-                $request->quantity * $request->price,
-            'payment_method' => $request->payment_method,
-            'payment_date' => $request->payment_date,
-            'remarks' => $request->remarks,
+                $validated['quantity'] * $validated['price'],
+            'payment_method' => $validated['payment_method'],
+            'payment_date' => $validated['payment_date'],
+            'remarks' => $validated['remarks'] ?? null,
         ]);
 
         return response()->json([
             'status' => true,
             'message' => 'Other Payment Added Successfully.',
-            'data' => $otherPayment->load('student'),
-        ]);
+            'data' => $otherPayment->load([
+                'student',
+                'studentSession.academicSession',
+                'studentSession.classInfo',
+                'studentSession.section',
+                'studentSession.shift',
+                'studentSession.classGroup',
+            ]),
+        ], 201);
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * DISPLAY SINGLE OTHER PAYMENT
-     * --------------------------------------------------------------------------
+     * DISPLAY SINGLE OTHER PAYMENT.
      */
     public function show(string $id)
     {
@@ -331,14 +308,21 @@ class OtherPaymentController extends Controller
         }
 
         $otherPayment = $this->branchOtherPaymentQuery()
-            ->with('student')
+            ->with([
+                'student',
+                'studentSession.academicSession',
+                'studentSession.classInfo',
+                'studentSession.section',
+                'studentSession.shift',
+                'studentSession.classGroup',
+            ])
             ->where('id', $id)
             ->first();
 
         if (!$otherPayment) {
             return response()->json([
                 'status' => false,
-                'message' => 'Other Payment not found',
+                'message' => 'Other Payment not found.',
             ], 404);
         }
 
@@ -349,23 +333,16 @@ class OtherPaymentController extends Controller
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * UPDATE OTHER PAYMENT
-     * --------------------------------------------------------------------------
+     * UPDATE OTHER PAYMENT.
      */
-    public function update(
-        Request $request,
-        string $id
-    ) {
+    public function update(Request $request, string $id)
+    {
         $authorization = $this->authorizeAccess();
 
         if ($authorization) {
             return $authorization;
         }
 
-        /**
-         * Find Payment Within Allowed Branch
-         */
         $otherPayment = $this->branchOtherPaymentQuery()
             ->where('id', $id)
             ->first();
@@ -373,12 +350,13 @@ class OtherPaymentController extends Controller
         if (!$otherPayment) {
             return response()->json([
                 'status' => false,
-                'message' => 'Other Payment not found',
+                'message' => 'Other Payment not found.',
             ], 404);
         }
 
-        $request->validate([
-            'student_id' => 'required|exists:students,id',
+        $validated = $request->validate([
+            'student_id' => 'required|integer|exists:students,id',
+            'student_session_id' => 'required|integer|exists:student_sessions,id',
             'item_name' => 'required|string|max:255',
             'quantity' => 'required|integer|min:1',
             'price' => 'required|numeric|min:0',
@@ -387,12 +365,7 @@ class OtherPaymentController extends Controller
             'remarks' => 'nullable|string',
         ]);
 
-        /**
-         * Check New Student Branch
-         */
-        $student = Student::findOrFail(
-            $request->student_id
-        );
+        $student = Student::findOrFail($validated['student_id']);
 
         if (!$this->studentAllowed($student)) {
             return response()->json([
@@ -401,32 +374,40 @@ class OtherPaymentController extends Controller
             ], 403);
         }
 
-        /**
-         * Update
-         */
+        $this->validateStudentSession(
+            (int) $validated['student_id'],
+            (int) $validated['student_session_id']
+        );
+
         $otherPayment->update([
-            'student_id' => $request->student_id,
-            'item_name' => $request->item_name,
-            'quantity' => $request->quantity,
-            'price' => $request->price,
+            'student_id' => $validated['student_id'],
+            'student_session_id' => $validated['student_session_id'],
+            'item_name' => $validated['item_name'],
+            'quantity' => $validated['quantity'],
+            'price' => $validated['price'],
             'total_amount' =>
-                $request->quantity * $request->price,
-            'payment_method' => $request->payment_method,
-            'payment_date' => $request->payment_date,
-            'remarks' => $request->remarks,
+                $validated['quantity'] * $validated['price'],
+            'payment_method' => $validated['payment_method'],
+            'payment_date' => $validated['payment_date'],
+            'remarks' => $validated['remarks'] ?? null,
         ]);
 
         return response()->json([
             'status' => true,
             'message' => 'Other Payment Updated Successfully.',
-            'data' => $otherPayment->load('student'),
+            'data' => $otherPayment->load([
+                'student',
+                'studentSession.academicSession',
+                'studentSession.classInfo',
+                'studentSession.section',
+                'studentSession.shift',
+                'studentSession.classGroup',
+            ]),
         ]);
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * DELETE OTHER PAYMENT
-     * --------------------------------------------------------------------------
+     * DELETE OTHER PAYMENT.
      */
     public function destroy(string $id)
     {
@@ -443,7 +424,7 @@ class OtherPaymentController extends Controller
         if (!$otherPayment) {
             return response()->json([
                 'status' => false,
-                'message' => 'Other Payment not found',
+                'message' => 'Other Payment not found.',
             ], 404);
         }
 

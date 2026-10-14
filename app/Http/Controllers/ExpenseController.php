@@ -3,17 +3,13 @@
 namespace App\Http\Controllers;
 
 use App\Models\Expense;
+use App\Models\AcademicSession;
 use App\Services\BranchContext;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 
 class ExpenseController extends Controller
 {
-    /**
-     * --------------------------------------------------------------------------
-     * CURRENT LOGGED-IN STAFF
-     * --------------------------------------------------------------------------
-     */
     private function staff()
     {
         return Auth::user()
@@ -21,57 +17,11 @@ class ExpenseController extends Controller
             ?? auth('sanctum')->user();
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * CURRENT BRANCH CONTEXT
-     * --------------------------------------------------------------------------
-     *
-     * Manager + All Branches
-     *     = null
-     *
-     * Manager + Selected Branch
-     *     = selected branch id
-     *
-     * Branch Manager / Branch Accountant
-     *     = their own branch through staff->branch_id
-     * --------------------------------------------------------------------------
-     */
     private function currentBranchId(): ?int
     {
         return app(BranchContext::class)->id();
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * MANAGER CHECK
-     * --------------------------------------------------------------------------
-     */
-    private function isManager(): bool
-    {
-        return $this->staff()?->role === 'Manager';
-    }
-
-    /**
-     * --------------------------------------------------------------------------
-     * BRANCH RESTRICTED ROLES
-     * --------------------------------------------------------------------------
-     */
-    private function isBranchRestricted(): bool
-    {
-        return in_array(
-            $this->staff()?->role,
-            [
-                'Branch Manager',
-                'Branch Accountant',
-            ]
-        );
-    }
-
-    /**
-     * --------------------------------------------------------------------------
-     * EXPENSE AUTHORIZATION
-     * --------------------------------------------------------------------------
-     */
     private function authorizeExpenseAccess()
     {
         $staff = $this->staff();
@@ -98,8 +48,7 @@ class ExpenseController extends Controller
             in_array($staff->role, [
                 'Branch Manager',
                 'Branch Accountant',
-            ])
-            && empty($staff->branch_id)
+            ]) && empty($staff->branch_id)
         ) {
             return response()->json([
                 'status' => false,
@@ -111,154 +60,54 @@ class ExpenseController extends Controller
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * EXPENSE QUERY WITH BRANCH ISOLATION
-     * --------------------------------------------------------------------------
-     *
-     * Manager + All Branches
-     *     -> All branches
-     *
-     * Manager + Selected Branch
-     *     -> Selected branch only
-     *
-     * Branch Manager
-     *     -> Own Branch Only
-     *
-     * Branch Accountant
-     *     -> Own Branch Only
-     * --------------------------------------------------------------------------
+     * Branch-isolated expense query.
      */
     private function branchExpenseQuery()
     {
         $query = Expense::query();
-
         $staff = $this->staff();
 
-        /**
-         * No authenticated staff
-         */
         if (!$staff) {
             return $query->whereRaw('1 = 0');
         }
 
-        /**
-         * Manager
-         */
         if ($staff->role === 'Manager') {
+            $branchId = $this->currentBranchId();
 
-            $currentBranchId = $this->currentBranchId();
-
-            /**
-             * All Branches
-             */
-            if ($currentBranchId === null) {
-                return $query;
-            }
-
-            /**
-             * Selected Branch
-             */
-            return $query->where(
-                'branch_id',
-                $currentBranchId
-            );
+            return $branchId === null
+                ? $query
+                : $query->where('branch_id', $branchId);
         }
 
-        /**
-         * Branch Manager / Branch Accountant
-         * = Own Branch Only
-         */
-        if (
-            in_array(
-                $staff->role,
-                [
-                    'Branch Manager',
-                    'Branch Accountant',
-                ]
-            )
-        ) {
-            if (empty($staff->branch_id)) {
-                return $query->whereRaw('1 = 0');
-            }
-
+        if (in_array($staff->role, [
+            'Branch Manager',
+            'Branch Accountant',
+        ])) {
             return $query->where(
                 'branch_id',
                 $staff->branch_id
             );
         }
 
-        /**
-         * Any other role
-         * = No expense data
-         */
         return $query->whereRaw('1 = 0');
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * CHECK WHETHER STAFF CAN ACCESS THIS EXPENSE
-     * --------------------------------------------------------------------------
+     * Validate that the academic session belongs
+     * to the branch where the expense is recorded.
      */
-    private function expenseAllowed(Expense $expense): bool
-    {
-        $staff = $this->staff();
-
-        /**
-         * No authenticated staff
-         */
-        if (!$staff) {
-            return false;
-        }
-
-        /**
-         * Manager
-         */
-        if ($staff->role === 'Manager') {
-
-            $currentBranchId = $this->currentBranchId();
-
-            /**
-             * All Branches
-             */
-            if ($currentBranchId === null) {
-                return true;
-            }
-
-            /**
-             * Selected Branch
-             */
-            return (int) $expense->branch_id ===
-                (int) $currentBranchId;
-        }
-
-        /**
-         * Branch Manager / Branch Accountant
-         * = Own Branch Only
-         */
-        if (
-            in_array(
-                $staff->role,
-                [
-                    'Branch Manager',
-                    'Branch Accountant',
-                ]
-            )
-        ) {
-            return !empty($staff->branch_id)
-                && (int) $expense->branch_id ===
-                (int) $staff->branch_id;
-        }
-
-        /**
-         * Other roles
-         */
-        return false;
+    private function sessionBelongsToBranch(
+        int $sessionId,
+        int $branchId
+    ): bool {
+        return AcademicSession::query()
+            ->where('id', $sessionId)
+            ->where('branch_id', $branchId)
+            ->exists();
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * DISPLAY ALL EXPENSES
-     * --------------------------------------------------------------------------
+     * GET /expenses
      */
     public function index()
     {
@@ -268,18 +117,22 @@ class ExpenseController extends Controller
             return $authorization;
         }
 
+        $expenses = $this->branchExpenseQuery()
+            ->with([
+                'branch:id,name',
+                'academicSession:id,name,branch_id,is_active',
+            ])
+            ->latest()
+            ->get();
+
         return response()->json([
             'status' => true,
-            'expenses' => $this->branchExpenseQuery()
-                ->latest()
-                ->get()
+            'expenses' => $expenses,
         ]);
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * STORE EXPENSE
-     * --------------------------------------------------------------------------
+     * POST /expenses
      */
     public function store(Request $request)
     {
@@ -290,175 +143,99 @@ class ExpenseController extends Controller
         }
 
         $request->validate([
-            'expense_type' => 'required|string',
+            'expense_type' => 'required|string|max:255',
             'employee_name' => 'nullable|string|max:255',
-            'salary_amount' => 'required|numeric',
-            'paid_amount' => 'required|numeric',
-            'payment_method' => 'required|string',
-            'payment_month' => 'required',
+            'salary_amount' => 'required|numeric|min:0',
+            'paid_amount' => 'required|numeric|min:0',
+            'payment_method' => 'required|in:Cash,Bkash,Nagad,Bank',
+            'payment_month' => [
+                'required',
+                'date_format:Y-m',
+            ],
             'payment_date' => 'nullable|date',
-            'branch_id' => 'nullable|exists:branches,id',
+            'academic_session_id' => 'required|integer|exists:academic_sessions,id',
+            'branch_id' => 'nullable|integer|exists:branches,id',
         ]);
 
-        /**
-         * Payment month formatting
-         */
-        $paymentMonth = $request->payment_month
-            ? (
-                strlen($request->payment_month) == 7
-                    ? $request->payment_month . '-01'
-                    : $request->payment_month
-            )
-            : null;
-
-        /**
-         * Calculate due
-         */
-        $dueAmount =
-            $request->salary_amount -
-            $request->paid_amount;
-
-        /**
-         * Get authenticated user
-         */
         $user = $this->staff();
 
-        if (!$user) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Unauthenticated'
-            ], 401);
-        }
-
-        /**
-         * Created by name
-         */
-        $createdByName =
-            $user->name ?? 'System Admin';
-
-        /**
-         * ----------------------------------------------------------------------
-         * BRANCH
-         * ----------------------------------------------------------------------
-         *
-         * Manager:
-         *     All Branches selected
-         *         -> request branch_id
-         *
-         *     Specific branch selected
-         *         -> selected context branch
-         *
-         * Branch Manager / Branch Accountant:
-         *     Always own branch
-         * ----------------------------------------------------------------------
+        /*
+         * Resolve branch using the existing branch rules.
          */
         if ($user->role === 'Manager') {
+            $contextBranchId = $this->currentBranchId();
 
-            $currentBranchId = $this->currentBranchId();
-
-            /**
-             * Manager + selected branch
-             * = Context is authoritative
-             */
-            if ($currentBranchId !== null) {
-                $branchId = $currentBranchId;
+            if ($contextBranchId !== null) {
+                $branchId = $contextBranchId;
             } else {
-                /**
-                 * Manager + All Branches
-                 * = request branch is allowed
-                 */
                 $branchId = $request->branch_id;
             }
-
-        } elseif (
-            in_array(
-                $user->role,
-                [
-                    'Branch Manager',
-                    'Branch Accountant',
-                ]
-            )
-        ) {
-
-            /**
-             * Always own branch.
-             * Request branch_id intentionally ignored.
-             */
+        } elseif (in_array($user->role, [
+            'Branch Manager',
+            'Branch Accountant',
+        ])) {
             $branchId = $user->branch_id;
-
         } else {
-
-            /**
-             * Normally blocked by authorizeExpenseAccess()
-             */
             return response()->json([
                 'status' => false,
-                'message' => 'Access Denied'
+                'message' => 'Access Denied.',
             ], 403);
         }
 
-        /**
-         * Branch is required
-         */
         if (!$branchId) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Branch is required for this expense.'
+                'message' => 'Branch is required for this expense.',
             ], 422);
         }
 
-        /**
-         * Create Expense
+        /*
+         * Session must belong to the resolved branch.
          */
+        if (!$this->sessionBelongsToBranch(
+            (int) $request->academic_session_id,
+            (int) $branchId
+        )) {
+            return response()->json([
+                'status' => false,
+                'message' => 'The selected academic session does not belong to this branch.',
+            ], 422);
+        }
+
+        $salary = (float) $request->salary_amount;
+        $paid = (float) $request->paid_amount;
+
+        $paymentMonth = $request->payment_month . '-01';
+
         $expense = Expense::create([
-            'expense_type' =>
-                $request->expense_type,
-
-            'employee_name' =>
-                $request->employee_name,
-
-            'salary_amount' =>
-                $request->salary_amount,
-
-            'paid_amount' =>
-                $request->paid_amount,
-
-            'due_amount' =>
-                $dueAmount < 0
-                    ? 0
-                    : $dueAmount,
-
-            'payment_month' =>
-                $paymentMonth,
-
-            'payment_method' =>
-                $request->payment_method,
-
-            'payment_date' =>
-                $request->payment_date
+            'expense_type' => $request->expense_type,
+            'employee_name' => $request->employee_name,
+            'salary_amount' => $salary,
+            'paid_amount' => $paid,
+            'due_amount' => max(0, $salary - $paid),
+            'payment_month' => $paymentMonth,
+            'payment_method' => $request->payment_method,
+            'payment_date' => $request->payment_date
                 ?? now()->toDateString(),
+            'created_by' => $user->name ?? 'System Admin',
+            'branch_id' => $branchId,
+            'academic_session_id' => $request->academic_session_id,
+        ]);
 
-            'created_by' =>
-                $createdByName,
-
-            'branch_id' =>
-                $branchId,
+        $expense->load([
+            'branch:id,name',
+            'academicSession:id,name,branch_id,is_active',
         ]);
 
         return response()->json([
             'status' => true,
-            'message' =>
-                'Expense added successfully.',
-            'expense' =>
-                $expense
+            'message' => 'Expense added successfully.',
+            'expense' => $expense,
         ], 201);
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * DISPLAY SINGLE EXPENSE
-     * --------------------------------------------------------------------------
+     * GET /expenses/{id}
      */
     public function show($id)
     {
@@ -469,42 +246,37 @@ class ExpenseController extends Controller
         }
 
         $expense = $this->branchExpenseQuery()
+            ->with([
+                'branch:id,name',
+                'academicSession:id,name,branch_id,is_active',
+            ])
             ->where('id', $id)
             ->first();
 
         if (!$expense) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Expense not found.'
+                'message' => 'Expense not found.',
             ], 404);
         }
 
         return response()->json([
             'status' => true,
-            'expense' => $expense
+            'expense' => $expense,
         ]);
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * UPDATE EXPENSE
-     * --------------------------------------------------------------------------
+     * PUT /expenses/{id}
      */
-    public function update(
-        Request $request,
-        $id
-    ) {
+    public function update(Request $request, $id)
+    {
         $authorization = $this->authorizeExpenseAccess();
 
         if ($authorization) {
             return $authorization;
         }
 
-        /**
-         * Only allowed branch expense
-         * can be updated.
-         */
         $expense = $this->branchExpenseQuery()
             ->where('id', $id)
             ->first();
@@ -512,201 +284,97 @@ class ExpenseController extends Controller
         if (!$expense) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Expense not found.'
+                'message' => 'Expense not found.',
             ], 404);
         }
 
         $request->validate([
-            'expense_type' =>
-                'required|string',
-
-            'employee_name' =>
-                'nullable|string|max:255',
-
-            'salary_amount' =>
-                'required|numeric',
-
-            'paid_amount' =>
-                'required|numeric',
-
-            'payment_method' =>
-                'required|string',
-
-            'payment_month' =>
-                'nullable',
-
-            'payment_date' =>
-                'nullable|date',
+            'expense_type' => 'required|string|max:255',
+            'employee_name' => 'nullable|string|max:255',
+            'salary_amount' => 'required|numeric|min:0',
+            'paid_amount' => 'required|numeric|min:0',
+            'payment_method' => 'required|in:Cash,Bkash,Nagad,Bank',
+            'payment_month' => 'required|date_format:Y-m',
+            'payment_date' => 'nullable|date',
+            'academic_session_id' => 'required|integer|exists:academic_sessions,id',
         ]);
 
-        /**
-         * Calculate due
+        /*
+         * Always validate against the expense's existing branch.
+         * Updating an expense must not move it to another branch.
          */
-        $dueAmount =
-            $request->salary_amount -
-            $request->paid_amount;
+        if (!$this->sessionBelongsToBranch(
+            (int) $request->academic_session_id,
+            (int) $expense->branch_id
+        )) {
+            return response()->json([
+                'status' => false,
+                'message' => 'The selected academic session does not belong to this expense branch.',
+            ], 422);
+        }
 
-        /**
-         * Payment month formatting
-         */
-        $paymentMonth = $request->payment_month
-            ? (
-                strlen($request->payment_month) == 7
-                    ? $request->payment_month . '-01'
-                    : $request->payment_month
-            )
-            : $expense->payment_month;
+        $salary = (float) $request->salary_amount;
+        $paid = (float) $request->paid_amount;
 
-        /**
-         * Update expense
-         *
-         * IMPORTANT:
-         * branch_id is NOT updated here.
-         */
         $expense->update([
-            'expense_type' =>
-                $request->expense_type,
-
-            'employee_name' =>
-                $request->employee_name,
-
-            'salary_amount' =>
-                $request->salary_amount,
-
-            'paid_amount' =>
-                $request->paid_amount,
-
-            'due_amount' =>
-                $dueAmount < 0
-                    ? 0
-                    : $dueAmount,
-
-            'payment_month' =>
-                $paymentMonth,
-
-            'payment_method' =>
-                $request->payment_method,
-
-            'payment_date' =>
-                $request->payment_date
+            'expense_type' => $request->expense_type,
+            'employee_name' => $request->employee_name,
+            'salary_amount' => $salary,
+            'paid_amount' => $paid,
+            'due_amount' => max(0, $salary - $paid),
+            'payment_month' => $request->payment_month . '-01',
+            'payment_method' => $request->payment_method,
+            'payment_date' => $request->payment_date
                 ?? $expense->payment_date
                 ?? now()->toDateString(),
+            'academic_session_id' => $request->academic_session_id,
+        ]);
+
+        $expense->load([
+            'branch:id,name',
+            'academicSession:id,name,branch_id,is_active',
         ]);
 
         return response()->json([
             'status' => true,
-            'message' =>
-                'Expense updated successfully.',
-            'expense' =>
-                $expense
+            'message' => 'Expense updated successfully.',
+            'expense' => $expense,
         ]);
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * GET TEACHERS FOR EXPENSE SALARY AUTO-FILL
-     * --------------------------------------------------------------------------
+     * GET /expense-teachers
      */
     public function getteachers()
     {
-        try {
+        $authorization = $this->authorizeExpenseAccess();
 
-            $authorization = $this->authorizeExpenseAccess();
-
-            if ($authorization) {
-                return $authorization;
-            }
-
-            $user = $this->staff();
-
-            if (!$user) {
-                return response()->json([
-                    'status' => false,
-                    'message' =>
-                        'Unauthenticated'
-                ], 401);
-            }
-
-            $query =
-                \App\Models\Teacher::query();
-
-            /**
-             * Manager
-             */
-            if ($user->role === 'Manager') {
-
-                $currentBranchId = $this->currentBranchId();
-
-                /**
-                 * All Branches
-                 */
-                if ($currentBranchId === null) {
-                    // All teachers
-                } else {
-                    /**
-                     * Selected Branch
-                     */
-                    $query->where(
-                        'branch_id',
-                        $currentBranchId
-                    );
-                }
-
-            /**
-             * Branch Manager / Branch Accountant
-             */
-            } elseif (
-                in_array(
-                    $user->role,
-                    [
-                        'Branch Manager',
-                        'Branch Accountant',
-                    ]
-                )
-            ) {
-
-                /**
-                 * Own branch only
-                 */
-                if (empty($user->branch_id)) {
-                    $query->whereRaw('1 = 0');
-                } else {
-                    $query->where(
-                        'branch_id',
-                        $user->branch_id
-                    );
-                }
-
-            } else {
-
-                /**
-                 * Other roles
-                 */
-                $query->whereRaw('1 = 0');
-            }
-
-            $teachers = $query->get();
-
-            return response()->json([
-                'status' => true,
-                'teachers' => $teachers
-            ]);
-
-        } catch (\Exception $e) {
-
-            return response()->json([
-                'status' => false,
-                'message' =>
-                    $e->getMessage()
-            ], 500);
+        if ($authorization) {
+            return $authorization;
         }
+
+        $user = $this->staff();
+
+        $query = \App\Models\Teacher::query();
+
+        if ($user->role === 'Manager') {
+            $branchId = $this->currentBranchId();
+
+            if ($branchId !== null) {
+                $query->where('branch_id', $branchId);
+            }
+        } else {
+            $query->where('branch_id', $user->branch_id);
+        }
+
+        return response()->json([
+            'status' => true,
+            'teachers' => $query->get(),
+        ]);
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * GET STAFF FOR EXPENSE SALARY AUTO-FILL
-     * --------------------------------------------------------------------------
+     * GET /expense-staffs
      */
     public function getStaffs()
     {
@@ -718,97 +386,29 @@ class ExpenseController extends Controller
 
         $user = $this->staff();
 
-        if (!$user) {
-            return response()->json([
-                'status' => false,
-                'message' =>
-                    'Unauthenticated'
-            ], 401);
-        }
+        $query = \App\Models\Staff::query()
+            ->where('role', '!=', 'Manager');
 
-        /**
-         * Manager excluded from employee list
-         */
-        $query = \App\Models\Staff::where(
-            'role',
-            '!=',
-            'Manager'
-        );
-
-        /**
-         * Manager
-         */
         if ($user->role === 'Manager') {
+            $branchId = $this->currentBranchId();
 
-            $currentBranchId = $this->currentBranchId();
-
-            /**
-             * All Branches
-             */
-            if ($currentBranchId === null) {
-                // All branch staff
-            } else {
-                /**
-                 * Selected Branch
-                 */
-                $query->where(
-                    'branch_id',
-                    $currentBranchId
-                );
+            if ($branchId !== null) {
+                $query->where('branch_id', $branchId);
             }
-
-        /**
-         * Branch Manager / Branch Accountant
-         */
-        } elseif (
-            in_array(
-                $user->role,
-                [
-                    'Branch Manager',
-                    'Branch Accountant',
-                ]
-            )
-        ) {
-
-            /**
-             * Own branch only
-             */
-            if (empty($user->branch_id)) {
-                $query->whereRaw('1 = 0');
-            } else {
-                $query->where(
-                    'branch_id',
-                    $user->branch_id
-                );
-            }
-
         } else {
-
-            /**
-             * Other roles
-             */
-            $query->whereRaw('1 = 0');
+            $query->where('branch_id', $user->branch_id);
         }
-
-        $staffs = $query
-            ->select(
-                'id',
-                'user_name',
-                'salary',
-                'branch_id'
-            )
-            ->get();
 
         return response()->json([
             'status' => true,
-            'staffs' => $staffs
+            'staffs' => $query
+                ->select('id', 'user_name', 'salary', 'branch_id')
+                ->get(),
         ]);
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * DELETE EXPENSE
-     * --------------------------------------------------------------------------
+     * DELETE /expenses/{id}
      */
     public function destroy($id)
     {
@@ -818,10 +418,6 @@ class ExpenseController extends Controller
             return $authorization;
         }
 
-        /**
-         * Only allowed branch expense
-         * can be deleted.
-         */
         $expense = $this->branchExpenseQuery()
             ->where('id', $id)
             ->first();
@@ -829,8 +425,7 @@ class ExpenseController extends Controller
         if (!$expense) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Expense not found.'
+                'message' => 'Expense not found.',
             ], 404);
         }
 
@@ -838,8 +433,7 @@ class ExpenseController extends Controller
 
         return response()->json([
             'status' => true,
-            'message' =>
-                'Expense deleted successfully.'
+            'message' => 'Expense deleted successfully.',
         ]);
     }
 }

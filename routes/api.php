@@ -27,6 +27,8 @@ use App\Http\Controllers\BackupController;
 use App\Http\Controllers\BranchController;
 use App\Http\Controllers\GradingSystemController;
 use App\Http\Middleware\PaymentAccessMiddleware;
+use App\Http\Controllers\AcademicSessionController;
+use App\Http\Controllers\StudentSessionController;
 
 Route::post('/login', [StafftController::class, 'login']);
 
@@ -259,7 +261,26 @@ Route::middleware([
         'class-groups',
         ClassGroupController::class
     );
+    Route::apiResource(
+        'academic-sessions',
+        AcademicSessionController::class
+    );
+    // CLASS MIGRATION
 
+    Route::get(
+        '/class-migration/options',
+        [StudentSessionController::class, 'options']
+    );
+
+    Route::get(
+        '/class-migration/students',
+        [StudentSessionController::class, 'students']
+    );
+
+    Route::post(
+        '/class-migration/migrate',
+        [StudentSessionController::class, 'migrate']
+    );
     Route::apiResource(
         'examinations',
         ExaminationController::class
@@ -358,6 +379,10 @@ Route::middleware([
         Route::put(
             '/payments/{id}',
             [PaymentController::class, 'update']
+        );
+        Route::get(
+            '/student-payment-register',
+            [PaymentController::class, 'paymentRegister']
         );
 
         Route::delete(

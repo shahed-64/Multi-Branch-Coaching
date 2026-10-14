@@ -71,4 +71,8 @@ class Student extends Model
             ? asset('storage/' . $this->image)
             : null;
     }
+    public function studentSessions(): \Illuminate\Database\Eloquent\Relations\HasMany
+    {
+        return $this->hasMany(StudentSession::class);
+    }
 }

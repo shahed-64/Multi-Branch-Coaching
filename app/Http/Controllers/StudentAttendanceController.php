@@ -2,135 +2,161 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AcademicSession;
 use App\Models\Student;
 use App\Models\StudentAttendance;
+use App\Models\StudentSession;
 use App\Services\BranchContext;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
 class StudentAttendanceController extends Controller
 {
-    /**
-     * Get authenticated user.
-     */
     private function authUser(Request $request)
     {
         return $request->user();
     }
 
-    /**
-     * Get current branch from BranchContext.
-     *
-     * null = Manager + All Branches
-     * branch id = selected/own branch
-     */
     private function currentBranchId(): ?int
     {
-        return app(BranchContext::class)->id();
+        $id = app(BranchContext::class)->id();
+
+        return $id === null ? null : (int) $id;
     }
 
-    /**
-     * Student Attendance Module Access
-     *
-     * Allowed:
-     * - Manager
-     * - Branch Manager
-     * - Admin
-     * - Branch Admin
-     *
-     * Not allowed:
-     * - Accountant
-     * - Branch Accountant
-     */
     private function canAccessModule($authUser): bool
     {
-        if (!$authUser) {
-            return false;
-        }
-
-        return in_array($authUser->role, [
-            'Manager',
-            'Branch Manager',
-            'Admin',
-            'Branch Admin',
-        ]);
+        return $authUser && in_array(
+            $authUser->role,
+            ['Manager', 'Branch Manager', 'Admin', 'Branch Admin'],
+            true
+        );
     }
 
-    /**
-     * Forbidden response.
-     */
-    private function forbidden(
-        string $message = 'You are not authorized to perform this action.'
-    ) {
+    private function forbidden()
+    {
         return response()->json([
-            'status' => false,
-            'message' => $message,
+            'message' => 'You are not authorized to access student attendance.',
         ], 403);
     }
 
-    /**
-     * Unauthenticated response.
-     */
     private function unauthenticated()
     {
         return response()->json([
-            'status' => false,
             'message' => 'Unauthenticated.',
         ], 401);
     }
 
-    /**
-     * Check whether authenticated user can access
-     * the selected student.
-     */
-    private function canAccessStudent(
-        $authUser,
-        Student $student
-    ): bool {
+    private function canAccessStudent($authUser, Student $student): bool
+    {
         if (!$authUser) {
             return false;
         }
 
-        $currentBranchId = $this->currentBranchId();
-
-        /**
-         * Manager + All Branches
-         */
-        if (
-            $authUser->role === 'Manager'
-            && $currentBranchId === null
-        ) {
+        if ($authUser->role === 'Manager' && $this->currentBranchId() === null) {
             return true;
         }
 
-        /**
-         * Everyone except Manager must have
-         * a current branch.
-         */
-        if ($currentBranchId === null) {
-            return false;
-        }
+        $branchId = $this->currentBranchId();
 
-        /**
-         * Student must belong to current branch.
-         */
-        return $student->branch_id !== null
-            && (int) $student->branch_id === (int) $currentBranchId;
+        return $branchId !== null
+            && (int) $student->branch_id === $branchId;
     }
 
     /**
-     * =========================================================
-     * INDEX
-     * =========================================================
-     *
-     * Get students with attendance for selected date.
-     *
-     * Filters:
-     * - date
-     * - class_id
-     * - class_group_id
-     * - section_id
-     * - shift_id
+     * Check whether the requested academic session is accessible
+     * within the current branch context.
+     */
+    private function accessibleSession(int $sessionId): ?AcademicSession
+    {
+        $query = AcademicSession::query()
+            ->whereKey($sessionId);
+
+        $branchId = $this->currentBranchId();
+
+        if ($branchId !== null) {
+            $query->where('branch_id', $branchId);
+        }
+
+        return $query->first();
+    }
+
+    /**
+     * Check whether an enrollment belongs to the current branch context.
+     */
+    private function accessibleStudentSession(
+        int $studentSessionId
+    ): ?StudentSession {
+        $query = StudentSession::query()
+            ->with([
+                'student',
+                'academicSession',
+                'classInfo',
+                'classGroup',
+                'section',
+                'shift',
+                'branch',
+            ])
+            ->whereKey($studentSessionId);
+
+        $branchId = $this->currentBranchId();
+
+        if ($branchId !== null) {
+            $query->where('branch_id', $branchId);
+        }
+
+        return $query->first();
+    }
+
+    /**
+     * Keep the existing flat student response shape for the Vue UI,
+     * while attaching the session-specific enrollment details.
+     */
+    private function formatStudentSession(
+        StudentSession $enrollment,
+        ?StudentAttendance $attendance = null
+    ): Student {
+        $student = $enrollment->student;
+
+        $student->setAttribute(
+            'student_session_id',
+            $enrollment->id
+        );
+
+        $student->setAttribute(
+            'academic_session_id',
+            $enrollment->academic_session_id
+        );
+
+        $student->setAttribute(
+            'enrollment_status',
+            $enrollment->status
+        );
+
+        $student->setAttribute(
+            'session_monthly_fee',
+            $enrollment->monthly_fee
+        );
+
+        $student->setRelation('classInfo', $enrollment->classInfo);
+        $student->setRelation('classGroup', $enrollment->classGroup);
+        $student->setRelation('section', $enrollment->section);
+        $student->setRelation('shift', $enrollment->shift);
+        $student->setRelation('branch', $enrollment->branch);
+        $student->setRelation('academicSession', $enrollment->academicSession);
+
+        $student->setRelation('attendance', $attendance);
+
+        $student->setAttribute('attendance_id', $attendance?->id);
+        $student->setAttribute('attendance_status', $attendance?->status);
+        $student->setAttribute('attendance_remarks', $attendance?->remarks);
+
+        return $student;
+    }
+
+    /**
+     * List students enrolled in a particular academic session.
      */
     public function index(Request $request)
     {
@@ -141,200 +167,94 @@ class StudentAttendanceController extends Controller
         }
 
         if (!$this->canAccessModule($authUser)) {
-            return $this->forbidden(
-                'You are not authorized to access student attendance.'
-            );
+            return $this->forbidden();
         }
 
-        $currentBranchId = $this->currentBranchId();
+        $validated = $request->validate([
+            'academic_session_id' => [
+                'required',
+                'integer',
+                'exists:academic_sessions,id',
+            ],
+            'date' => ['nullable', 'date'],
+            'class_id' => ['nullable', 'integer'],
+            'class_group_id' => ['nullable', 'integer'],
+            'section_id' => ['nullable', 'integer'],
+            'shift_id' => ['nullable', 'integer'],
+        ]);
 
-        /**
-         * Non-Manager must have a branch.
-         */
-        if (
-            $authUser->role !== 'Manager'
-            && $currentBranchId === null
-        ) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Your account is not assigned to any branch.',
-            ], 403);
-        }
-
-        /**
-         * Date
-         */
-        $date = $request->input(
-            'date',
-            now()->toDateString()
+        $academicSession = $this->accessibleSession(
+            (int) $validated['academic_session_id']
         );
 
-        /**
-         * Validate filters.
-         */
-        $request->validate([
-            'date' => [
-                'nullable',
-                'date',
-            ],
-            'class_id' => [
-                'nullable',
-                'integer',
-            ],
-            'class_group_id' => [
-                'nullable',
-                'integer',
-            ],
-            'section_id' => [
-                'nullable',
-                'integer',
-            ],
-            'shift_id' => [
-                'nullable',
-                'integer',
-            ],
-        ]);
-
-        /**
-         * =========================================================
-         * STUDENT QUERY
-         * =========================================================
-         */
-        $studentQuery = Student::with([
-            'section',
-            'classInfo',
-            'classGroup',
-            'shift',
-            'branch',
-        ]);
-
-        /**
-         * Manager + All Branches
-         *
-         * No branch filter.
-         *
-         * Manager + selected branch
-         *
-         * BranchContext will provide branch id.
-         */
-        if ($currentBranchId !== null) {
-            $studentQuery->where(
-                'branch_id',
-                $currentBranchId
-            );
+        if (!$academicSession) {
+            return $this->forbidden();
         }
 
-        /**
-         * Class filter.
-         */
-        if ($request->filled('class_id')) {
-            $studentQuery->where(
-                'class_id',
-                $request->class_id
-            );
+        $date = $validated['date'] ?? now()->toDateString();
+
+        $query = StudentSession::query()
+            ->with([
+                'student',
+                'academicSession',
+                'classInfo',
+                'classGroup',
+                'section',
+                'shift',
+                'branch',
+            ])
+            ->where('academic_session_id', $academicSession->id);
+
+        $branchId = $this->currentBranchId();
+
+        if ($branchId !== null) {
+            $query->where('branch_id', $branchId);
         }
 
-        /**
-         * Class Group filter.
-         */
-        if ($request->filled('class_group_id')) {
-            $studentQuery->where(
-                'class_group_id',
-                $request->class_group_id
-            );
+        foreach ([
+            'class_id',
+            'class_group_id',
+            'section_id',
+            'shift_id',
+        ] as $filter) {
+            if (
+                isset($validated[$filter])
+                && $validated[$filter] !== ''
+            ) {
+                $query->where($filter, $validated[$filter]);
+            }
         }
 
-        /**
-         * Section filter.
-         */
-        if ($request->filled('section_id')) {
-            $studentQuery->where(
-                'section_id',
-                $request->section_id
-            );
-        }
-
-        /**
-         * Shift filter.
-         */
-        if ($request->filled('shift_id')) {
-            $studentQuery->where(
-                'shift_id',
-                $request->shift_id
-            );
-        }
-
-        /**
-         * Get students.
-         */
-        $students = $studentQuery
-            ->orderBy('id', 'desc')
+        $enrollments = $query
+            ->whereHas('student')
             ->get();
 
-        /**
-         * =========================================================
-         * ATTENDANCE QUERY
-         * =========================================================
-         */
-        $studentIds = $students
-            ->pluck('id')
-            ->toArray();
+        $sessionIds = $enrollments->pluck('id');
 
-        $attendanceQuery = StudentAttendance::where(
-            'date',
-            $date
-        )->whereIn(
-            'student_id',
-            $studentIds
-        );
+        $attendanceQuery = StudentAttendance::query()
+            ->whereDate('date', $date)
+            ->whereIn('student_session_id', $sessionIds);
 
-        /**
-         * Branch isolation for attendance.
-         */
-        if ($currentBranchId !== null) {
-            $attendanceQuery->where(
-                'branch_id',
-                $currentBranchId
-            );
+        if ($branchId !== null) {
+            $attendanceQuery->where('branch_id', $branchId);
         }
 
-        /**
-         * Key attendance by student_id.
-         */
-        $attendances = $attendanceQuery
+        $attendanceBySession = $attendanceQuery
             ->get()
-            ->keyBy('student_id');
+            ->keyBy('student_session_id');
 
-        /**
-         * =========================================================
-         * ATTACH ATTENDANCE TO STUDENTS
-         * =========================================================
-         */
-        $students->each(function ($student) use ($attendances) {
-            $attendance = $attendances->get(
-                $student->id
+        $students = $enrollments->map(function ($enrollment) use (
+            $attendanceBySession
+        ) {
+            return $this->formatStudentSession(
+                $enrollment,
+                $attendanceBySession->get($enrollment->id)
             );
-
-            /**
-             * Full attendance object.
-             */
-            $student->attendance = $attendance;
-
-            /**
-             * Easy fields for Vue.
-             */
-            $student->attendance_id =
-                $attendance?->id;
-
-            $student->attendance_status =
-                $attendance?->status;
-
-            $student->attendance_remarks =
-                $attendance?->remarks;
-        });
+        })->values();
 
         return response()->json([
-            'status' => true,
+            'academic_session' => $academicSession,
+            'academic_session_id' => $academicSession->id,
             'date' => $date,
             'students' => $students,
             'total_students' => $students->count(),
@@ -342,20 +262,7 @@ class StudentAttendanceController extends Controller
     }
 
     /**
-     * =========================================================
-     * STORE / CREATE OR UPDATE
-     * =========================================================
-     *
-     * One student attendance at a time.
-     *
-     * Payload:
-     *
-     * {
-     *     "student_id": 1,
-     *     "date": "2026-10-03",
-     *     "status": "present",
-     *     "remarks": "..."
-     * }
+     * Create or update attendance for a student's session enrollment.
      */
     public function store(Request $request)
     {
@@ -366,117 +273,86 @@ class StudentAttendanceController extends Controller
         }
 
         if (!$this->canAccessModule($authUser)) {
-            return $this->forbidden(
-                'You are not authorized to manage student attendance.'
-            );
+            return $this->forbidden();
         }
 
-        /**
-         * Validation.
-         */
         $validated = $request->validate([
             'student_id' => [
                 'required',
                 'integer',
                 'exists:students,id',
             ],
-            'date' => [
+            'academic_session_id' => [
                 'required',
-                'date',
+                'integer',
+                'exists:academic_sessions,id',
             ],
+            'date' => ['required', 'date'],
             'status' => [
                 'required',
-                Rule::in([
-                    'present',
-                    'absent',
-                    'late',
-                    'leave',
-                ]),
+                Rule::in(['present', 'absent', 'late', 'leave']),
             ],
-            'remarks' => [
-                'nullable',
-                'string',
-                'max:1000',
-            ],
+            'remarks' => ['nullable', 'string', 'max:1000'],
         ]);
 
-        /**
-         * Find student.
-         */
-        $student = Student::findOrFail(
-            $validated['student_id']
+        $academicSession = $this->accessibleSession(
+            (int) $validated['academic_session_id']
         );
 
-        /**
-         * Branch security.
-         */
-        if (!$this->canAccessStudent(
-            $authUser,
-            $student
-        )) {
-            return $this->forbidden(
-                'You cannot manage attendance for a student from another branch.'
-            );
+        if (!$academicSession) {
+            return $this->forbidden();
         }
 
-        /**
-         * Student must have branch.
-         */
-        if (!$student->branch_id) {
+        $enrollmentQuery = StudentSession::query()
+            ->with(['student', 'academicSession', 'branch'])
+            ->where('student_id', $validated['student_id'])
+            ->where('academic_session_id', $academicSession->id);
+
+        $branchId = $this->currentBranchId();
+
+        if ($branchId !== null) {
+            $enrollmentQuery->where('branch_id', $branchId);
+        }
+
+        $enrollment = $enrollmentQuery->first();
+
+        if (!$enrollment || !$enrollment->student) {
             return response()->json([
-                'status' => false,
-                'message' => 'Student is not assigned to any branch.',
+                'message' => 'Student is not enrolled in the selected academic session.',
             ], 422);
         }
 
-        /**
-         * Branch is always taken from student.
-         *
-         * Frontend cannot choose branch_id.
-         */
-        $branchId = $student->branch_id;
+        if (!$this->canAccessStudent($authUser, $enrollment->student)) {
+            return $this->forbidden();
+        }
 
-        /**
-         * Create or update attendance for
-         * same student + same date.
-         */
         $attendance = StudentAttendance::updateOrCreate(
             [
-                'student_id' => $student->id,
+                'student_session_id' => $enrollment->id,
                 'date' => $validated['date'],
             ],
             [
-                'branch_id' => $branchId,
+                'student_id' => $enrollment->student_id,
+                'branch_id' => $enrollment->branch_id,
                 'status' => $validated['status'],
                 'remarks' => $validated['remarks'] ?? null,
             ]
         );
 
         return response()->json([
-            'status' => true,
-            'message' => 'Student attendance saved successfully.',
+            'message' => 'Attendance saved successfully.',
             'attendance' => $attendance->load([
                 'student',
+                'studentSession.academicSession',
                 'branch',
             ]),
-        ], 200);
+        ]);
     }
 
     /**
-     * =========================================================
-     * QR SCAN ATTENDANCE
-     * =========================================================
+     * QR scan attendance.
      *
-     * QR payload:
-     *
-     * {
-     *     "student_id": "STD-1005"
-     * }
-     *
-     * QR scan always marks the student as PRESENT.
-     *
-     * If today's attendance already exists,
-     * no existing attendance will be changed.
+     * The frontend must send academic_session_id along with student_id.
      */
     public function scan(Request $request)
     {
@@ -487,139 +363,99 @@ class StudentAttendanceController extends Controller
         }
 
         if (!$this->canAccessModule($authUser)) {
-            return $this->forbidden(
-                'You are not authorized to use QR attendance.'
-            );
+            return $this->forbidden();
         }
 
-        /**
-         * Validate QR student ID.
-         *
-         * Example:
-         * STD-1005
-         */
         $validated = $request->validate([
-            'student_id' => [
+            'student_id' => ['required', 'string', 'max:255'],
+            'academic_session_id' => [
                 'required',
-                'string',
-                'max:100',
+                'integer',
+                'exists:academic_sessions,id',
             ],
         ]);
 
-        /**
-         * Find student by generated Student ID.
-         */
-        $student = Student::where(
-            'student_id',
-            $validated['student_id']
-        )->first();
+        $academicSession = $this->accessibleSession(
+            (int) $validated['academic_session_id']
+        );
+
+        if (!$academicSession) {
+            return $this->forbidden();
+        }
+
+        $student = Student::query()
+            ->where('student_id', $validated['student_id'])
+            ->first();
 
         if (!$student) {
             return response()->json([
-                'status' => false,
                 'message' => 'Student not found.',
             ], 404);
         }
 
-        /**
-         * Branch security.
-         *
-         * This prevents a scanner in one branch
-         * from marking another branch's student.
-         */
-        if (!$this->canAccessStudent(
-            $authUser,
-            $student
-        )) {
-            return $this->forbidden(
-                'You cannot scan attendance for a student from another branch.'
-            );
+        if (!$this->canAccessStudent($authUser, $student)) {
+            return $this->forbidden();
         }
 
-        /**
-         * Student must have branch.
-         */
-        if (!$student->branch_id) {
+        $enrollmentQuery = StudentSession::query()
+            ->where('student_id', $student->id)
+            ->where('academic_session_id', $academicSession->id);
+
+        $branchId = $this->currentBranchId();
+
+        if ($branchId !== null) {
+            $enrollmentQuery->where('branch_id', $branchId);
+        }
+
+        $enrollment = $enrollmentQuery->first();
+
+        if (!$enrollment) {
             return response()->json([
-                'status' => false,
-                'message' => 'Student is not assigned to any branch.',
+                'message' => 'Student is not enrolled in the selected academic session.',
             ], 422);
         }
 
-        /**
-         * Today.
-         */
         $today = now()->toDateString();
 
-        /**
-         * Check whether today's attendance
-         * already exists.
-         */
-        $existingAttendance = StudentAttendance::where(
-            'student_id',
-            $student->id
-        )
-            ->where(
-                'date',
-                $today
-            )
+        $existing = StudentAttendance::query()
+            ->where('student_session_id', $enrollment->id)
+            ->whereDate('date', $today)
             ->first();
 
-        /**
-         * Do not modify an existing attendance.
-         *
-         * This is important because:
-         *
-         * Manual Absent/Leave/Late
-         * should not become Present
-         * just because the QR was scanned again.
-         */
-        if ($existingAttendance) {
+        if ($existing) {
             return response()->json([
-                'status' => false,
+                'message' => 'Attendance already recorded for this session today.',
                 'already_attended' => true,
-                'message' => 'Attendance already recorded for today.',
-                'student' => [
-                    'id' => $student->id,
-                    'student_id' => $student->student_id,
-                    'name' => $student->full_name,
-                    'branch_id' => $student->branch_id,
-                ],
-                'attendance' => $existingAttendance,
+                'attendance' => $existing->load([
+                    'student',
+                    'studentSession.academicSession',
+                    'branch',
+                ]),
             ], 409);
         }
 
-        /**
-         * Create today's attendance.
-         *
-         * Branch is always taken from the student.
-         */
         $attendance = StudentAttendance::create([
-            'student_id' => $student->id,
-            'branch_id' => $student->branch_id,
+            'student_session_id' => $enrollment->id,
+            'student_id' => $enrollment->student_id,
+            'branch_id' => $enrollment->branch_id,
             'date' => $today,
             'status' => 'present',
             'remarks' => 'QR Scan',
         ]);
 
         return response()->json([
-            'status' => true,
+            'message' => 'Attendance recorded successfully.',
             'already_attended' => false,
-            'message' => 'Attendance marked successfully.',
-            'student' => [
-                'id' => $student->id,
-                'student_id' => $student->student_id,
-                'name' => $student->full_name,
-                'branch_id' => $student->branch_id,
-            ],
-            'attendance' => $attendance,
+            'attendance' => $attendance->load([
+                'student',
+                'studentSession.academicSession',
+                'branch',
+            ]),
         ], 201);
     }
 
     /**
-     * =========================================================
-     * SHOW
-     * =========================================================
+     * Show a specific attendance record.
      */
     public function show(
         StudentAttendance $studentAttendance,
@@ -632,22 +468,15 @@ class StudentAttendanceController extends Controller
         }
 
         if (!$this->canAccessModule($authUser)) {
-            return $this->forbidden(
-                'You are not authorized to access student attendance.'
-            );
+            return $this->forbidden();
         }
 
-        /**
-         * Student relation.
-         */
         $studentAttendance->load([
             'student',
+            'studentSession.academicSession',
             'branch',
         ]);
 
-        /**
-         * Check student branch access.
-         */
         if (
             !$studentAttendance->student
             || !$this->canAccessStudent(
@@ -655,21 +484,16 @@ class StudentAttendanceController extends Controller
                 $studentAttendance->student
             )
         ) {
-            return $this->forbidden(
-                'You cannot access attendance from another branch.'
-            );
+            return $this->forbidden();
         }
 
         return response()->json([
-            'status' => true,
             'attendance' => $studentAttendance,
         ]);
     }
 
     /**
-     * =========================================================
-     * UPDATE
-     * =========================================================
+     * Update the status or remarks of an existing attendance record.
      */
     public function update(
         Request $request,
@@ -682,19 +506,11 @@ class StudentAttendanceController extends Controller
         }
 
         if (!$this->canAccessModule($authUser)) {
-            return $this->forbidden(
-                'You are not authorized to update student attendance.'
-            );
+            return $this->forbidden();
         }
 
-        /**
-         * Load student.
-         */
         $studentAttendance->load('student');
 
-        /**
-         * Branch security.
-         */
         if (
             !$studentAttendance->student
             || !$this->canAccessStudent(
@@ -702,53 +518,34 @@ class StudentAttendanceController extends Controller
                 $studentAttendance->student
             )
         ) {
-            return $this->forbidden(
-                'You cannot update attendance from another branch.'
-            );
+            return $this->forbidden();
         }
 
-        /**
-         * Validation.
-         */
         $validated = $request->validate([
             'status' => [
                 'required',
-                Rule::in([
-                    'present',
-                    'absent',
-                    'late',
-                    'leave',
-                ]),
+                Rule::in(['present', 'absent', 'late', 'leave']),
             ],
-            'remarks' => [
-                'nullable',
-                'string',
-                'max:1000',
-            ],
+            'remarks' => ['nullable', 'string', 'max:1000'],
         ]);
 
-        /**
-         * Update only allowed fields.
-         */
         $studentAttendance->update([
             'status' => $validated['status'],
             'remarks' => $validated['remarks'] ?? null,
         ]);
 
         return response()->json([
-            'status' => true,
-            'message' => 'Student attendance updated successfully.',
+            'message' => 'Attendance updated successfully.',
             'attendance' => $studentAttendance->fresh()->load([
                 'student',
+                'studentSession.academicSession',
                 'branch',
             ]),
         ]);
     }
 
     /**
-     * =========================================================
-     * MONTHLY ATTENDANCE SUMMARY
-     * =========================================================
+     * Monthly summary for one academic session.
      */
     public function monthlySummary(Request $request)
     {
@@ -759,96 +556,81 @@ class StudentAttendanceController extends Controller
         }
 
         if (!$this->canAccessModule($authUser)) {
-            return $this->forbidden(
-                'You are not authorized to access student attendance.'
-            );
+            return $this->forbidden();
         }
 
-        $currentBranchId = $this->currentBranchId();
-
-        if (
-            $authUser->role !== 'Manager'
-            && $currentBranchId === null
-        ) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Your account is not assigned to any branch.',
-            ], 403);
-        }
-
-        $month = $request->input(
-            'month',
-            now()->format('Y-m')
-        );
-
-        $request->validate([
+        $validated = $request->validate([
+            'academic_session_id' => [
+                'required',
+                'integer',
+                'exists:academic_sessions,id',
+            ],
             'month' => [
                 'nullable',
                 'date_format:Y-m',
             ],
         ]);
 
-        $query = StudentAttendance::query()
-            ->whereYear('date', substr($month, 0, 4))
-            ->whereMonth('date', substr($month, 5, 2));
+        $academicSession = $this->accessibleSession(
+            (int) $validated['academic_session_id']
+        );
 
-        /**
-         * Branch isolation
-         */
-        if ($currentBranchId !== null) {
-            $query->where(
-                'branch_id',
-                $currentBranchId
-            );
+        if (!$academicSession) {
+            return $this->forbidden();
         }
 
-        $totalRecords = (clone $query)->count();
+        $month = $validated['month'] ?? now()->format('Y-m');
+        [$year, $monthNumber] = array_map(
+            'intval',
+            explode('-', $month)
+        );
 
-        $present = (clone $query)
-            ->whereIn('status', ['present', 'late'])
-            ->count();
+        $query = StudentAttendance::query()
+            ->whereYear('date', $year)
+            ->whereMonth('date', $monthNumber)
+            ->whereHas('studentSession', function ($query) use (
+                $academicSession
+            ) {
+                $query->where(
+                    'academic_session_id',
+                    $academicSession->id
+                );
+            });
 
-        $absent = (clone $query)
-            ->where('status', 'absent')
-            ->count();
+        $branchId = $this->currentBranchId();
 
-        $leave = (clone $query)
-            ->where('status', 'leave')
-            ->count();
+        if ($branchId !== null) {
+            $query->where('branch_id', $branchId);
+        }
 
-        $applicable = $present + $absent + $leave;
+        $records = $query->get();
 
-        $presentPercentage = $applicable > 0
-            ? round(($present / $applicable) * 100)
-            : 0;
-
-        $absentPercentage = $applicable > 0
-            ? round(($absent / $applicable) * 100)
-            : 0;
-
-        $leavePercentage = $applicable > 0
-            ? 100 - $presentPercentage - $absentPercentage
-            : 0;
+        $totalRecords = $records->count();
+        $present = $records->whereIn('status', ['present', 'late'])->count();
+        $absent = $records->where('status', 'absent')->count();
+        $leave = $records->where('status', 'leave')->count();
 
         return response()->json([
-            'status' => true,
+            'academic_session' => $academicSession,
             'month' => $month,
             'total_records' => $totalRecords,
             'present' => $present,
             'absent' => $absent,
             'leave' => $leave,
-            'present_percentage' => $presentPercentage,
-            'absent_percentage' => $absentPercentage,
-            'leave_percentage' => $leavePercentage,
+            'present_percentage' => $totalRecords > 0
+                ? round(($present / $totalRecords) * 100, 2)
+                : 0,
+            'absent_percentage' => $totalRecords > 0
+                ? round(($absent / $totalRecords) * 100, 2)
+                : 0,
         ]);
     }
 
     /**
-     * =========================================================
-     * YEARLY ATTENDANCE SUMMARY
-     * =========================================================
+     * Yearly summary for one academic session.
      *
-     * Yearly attendance summary for all students.
+     * Here "year" means the calendar year of attendance dates;
+     * academic-session filtering is applied separately.
      */
     public function yearlySummary(Request $request)
     {
@@ -859,12 +641,15 @@ class StudentAttendanceController extends Controller
         }
 
         if (!$this->canAccessModule($authUser)) {
-            return $this->forbidden(
-                'You are not authorized to access student attendance.'
-            );
+            return $this->forbidden();
         }
 
         $validated = $request->validate([
+            'academic_session_id' => [
+                'required',
+                'integer',
+                'exists:academic_sessions,id',
+            ],
             'year' => [
                 'nullable',
                 'integer',
@@ -873,158 +658,101 @@ class StudentAttendanceController extends Controller
             ],
         ]);
 
-        $year = $validated['year'] ?? now()->year;
+        $academicSession = $this->accessibleSession(
+            (int) $validated['academic_session_id']
+        );
+
+        if (!$academicSession) {
+            return $this->forbidden();
+        }
+
+        $year = (int) ($validated['year'] ?? now()->year);
+
+        $enrollmentQuery = StudentSession::query()
+            ->with([
+                'student',
+                'academicSession',
+                'classInfo',
+                'classGroup',
+                'section',
+                'shift',
+                'branch',
+            ])
+            ->where('academic_session_id', $academicSession->id);
 
         $branchId = $this->currentBranchId();
 
-        /**
-         * Students
-         */
-        $studentQuery = Student::with([
-            'classInfo',
-        ]);
-
-        /**
-         * Branch Isolation
-         */
         if ($branchId !== null) {
-            $studentQuery->where(
-                'branch_id',
-                $branchId
-            );
+            $enrollmentQuery->where('branch_id', $branchId);
         }
 
-        $students = $studentQuery
-            ->orderBy('id', 'desc')
+        $enrollments = $enrollmentQuery
+            ->whereHas('student')
             ->get();
 
-        if ($students->isEmpty()) {
-            return response()->json([
-                'status' => true,
-                'year' => $year,
-                'students' => [],
-            ]);
-        }
+        $sessionIds = $enrollments->pluck('id');
 
-        /**
-         * Attendance Records
-         */
-        $studentIds = $students->pluck('id');
-
-        $attendanceQuery = StudentAttendance::whereIn(
-            'student_id',
-            $studentIds
-        )
-            ->whereYear('date', $year)
-            ->orderBy('date', 'asc');
+        $attendanceQuery = StudentAttendance::query()
+            ->whereIn('student_session_id', $sessionIds)
+            ->whereYear('date', $year);
 
         if ($branchId !== null) {
-            $attendanceQuery->where(
-                'branch_id',
-                $branchId
-            );
+            $attendanceQuery->where('branch_id', $branchId);
         }
 
-        $attendances = $attendanceQuery->get();
+        $attendanceBySession = $attendanceQuery
+            ->orderBy('date')
+            ->get()
+            ->groupBy('student_session_id');
 
-        /**
-         * Group attendance by student
-         */
-        $attendanceByStudent = $attendances->groupBy(
-            'student_id'
-        );
+        $students = $enrollments->map(function ($enrollment) use (
+            $attendanceBySession
+        ) {
+            $records = $attendanceBySession->get(
+                $enrollment->id,
+                collect()
+            );
 
-        /**
-         * Build yearly summary
-         */
-        $result = $students->map(
-            function ($student) use ($attendanceByStudent) {
-                $studentAttendances =
-                    $attendanceByStudent->get(
-                        $student->id,
-                        collect()
-                    );
+            $present = $records->whereIn(
+                'status',
+                ['present', 'late']
+            )->count();
 
-                $present = $studentAttendances
-                    ->where('status', 'present')
-                    ->count();
+            $absent = $records->where('status', 'absent')->count();
+            $leave = $records->where('status', 'leave')->count();
 
-                $late = $studentAttendances
-                    ->where('status', 'late')
-                    ->count();
+            $student = $this->formatStudentSession($enrollment);
 
-                $absent = $studentAttendances
-                    ->where('status', 'absent')
-                    ->count();
+            $student->setAttribute('present', $present);
+            $student->setAttribute('absent', $absent);
+            $student->setAttribute('leave', $leave);
+            $student->setAttribute('total_records', $records->count());
 
-                $leave = $studentAttendances
-                    ->where('status', 'leave')
-                    ->count();
+            $student->setAttribute(
+                'attendance_records',
+                $records->map(function ($record) {
+                    return [
+                        'id' => $record->id,
+                        'date' => $record->date,
+                        'status' => $record->status,
+                        'remarks' => $record->remarks,
+                    ];
+                })->values()
+            );
 
-                $totalRecords =
-                    $studentAttendances->count();
-
-                return [
-                    'id' => $student->id,
-
-                    'student_code' =>
-                        $student->student_id
-                        ?? ('STD-' . $student->id),
-
-                    'name' =>
-                        $student->full_name
-                        ?? 'Unknown',
-
-                    'class_name' =>
-                        optional(
-                            $student->classInfo
-                        )->class_name,
-
-                    'present' => $present,
-
-                    'late' => $late,
-
-                    'absent' => $absent,
-
-                    'leave' => $leave,
-
-                    'total_records' =>
-                        $totalRecords,
-
-                    /**
-                     * Only required data for the
-                     * yearly/monthly report.
-                     *
-                     * Group, Section and Shift
-                     * are intentionally excluded.
-                     */
-                    'attendances' =>
-                        $studentAttendances
-                            ->map(function ($attendance) {
-                                return [
-                                    'date' =>
-                                        $attendance->date,
-
-                                    'status' =>
-                                        $attendance->status,
-                                ];
-                            })
-                            ->values(),
-                ];
-            }
-        )->values();
+            return $student;
+        })->values();
 
         return response()->json([
-            'status' => true,
+            'academic_session' => $academicSession,
+            'academic_session_id' => $academicSession->id,
             'year' => $year,
-            'students' => $result,
+            'students' => $students,
         ]);
     }
 
     /**
-     * =========================================================
-     * DELETE
-     * =========================================================
+     * Delete an attendance record.
      */
     public function destroy(
         StudentAttendance $studentAttendance,
@@ -1037,19 +765,11 @@ class StudentAttendanceController extends Controller
         }
 
         if (!$this->canAccessModule($authUser)) {
-            return $this->forbidden(
-                'You are not authorized to delete student attendance.'
-            );
+            return $this->forbidden();
         }
 
-        /**
-         * Load student.
-         */
         $studentAttendance->load('student');
 
-        /**
-         * Branch security.
-         */
         if (
             !$studentAttendance->student
             || !$this->canAccessStudent(
@@ -1057,16 +777,13 @@ class StudentAttendanceController extends Controller
                 $studentAttendance->student
             )
         ) {
-            return $this->forbidden(
-                'You cannot delete attendance from another branch.'
-            );
+            return $this->forbidden();
         }
 
         $studentAttendance->delete();
 
         return response()->json([
-            'status' => true,
-            'message' => 'Student attendance deleted successfully.',
+            'message' => 'Attendance deleted successfully.',
         ]);
     }
 }

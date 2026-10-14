@@ -13,14 +13,24 @@ class Result extends Model
 
     protected $fillable = [
         'student_id',
+        'student_session_id',
         'exam_year',
         'exam_type',
         'branch_id',
+        'class_name_snapshot',
+        'section_name_snapshot',
+        'shift_name_snapshot',
+        'class_group_name_snapshot',
     ];
 
     public function student(): BelongsTo
     {
         return $this->belongsTo(Student::class);
+    }
+
+    public function studentSession(): BelongsTo
+    {
+        return $this->belongsTo(StudentSession::class);
     }
 
     public function resultSubjects(): HasMany

@@ -1,28 +1,20 @@
 <?php
 
 namespace App\Http\Controllers;
-
 use App\Models\Result;
 use App\Models\Student;
+use App\Models\StudentSession;
 use App\Models\GroupSubjectMapping;
 use App\Models\GradingSystem;
 use App\Models\Examination;
 use App\Models\Subject;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Validation\Rule;
 
 class ResultController extends Controller
 {
     /**
      * Result module access.
-     *
-     * Manager          → All branches
-     * Branch Manager   → Own branch
-     * Admin            → Own branch
-     * Branch Admin     → Own branch
-     * Accountant       → No access
-     * Branch Accountant → No access
      */
     private function authorizeAccess(Request $request): ?JsonResponse
     {
@@ -46,7 +38,7 @@ class ResultController extends Controller
     }
 
     /**
-     * Display results.
+     * Display results and students with their academic sessions.
      */
     public function index(Request $request): JsonResponse
     {
@@ -56,8 +48,10 @@ class ResultController extends Controller
 
         $user = $request->user();
 
-        $perPage = (int) $request->query('per_page', 20);
-        $perPage = max(1, min($perPage, 100));
+        $perPage = max(
+            1,
+            min((int) $request->query('per_page', 20), 100)
+        );
 
         $studentSearch = $request->query('student_search');
 
@@ -71,62 +65,33 @@ class ResultController extends Controller
             'student.section',
             'student.classInfo',
             'student.classGroup',
+            'studentSession.academicSession',
+            'studentSession.classInfo',
+            'studentSession.section',
+            'studentSession.shift',
+            'studentSession.classGroup',
             'resultSubjects.subject',
         ]);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Branch Isolation
-        |--------------------------------------------------------------------------
-        */
-
         if ($user->role !== 'Manager') {
-            $resultsQuery->where(
-                'branch_id',
-                $user->branch_id
-            );
+            $resultsQuery->where('branch_id', $user->branch_id);
         }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Student Search
-        |--------------------------------------------------------------------------
-        */
 
         if ($studentSearch) {
-            $resultsQuery->whereHas(
-                'student',
-                function ($query) use ($studentSearch, $user) {
-                    $query->where(
-                        function ($q) use ($studentSearch) {
-                            $q->where(
-                                'full_name',
-                                'like',
-                                "%{$studentSearch}%"
-                            )
-                                ->orWhere(
-                                    'student_id',
-                                    'like',
-                                    "%{$studentSearch}%"
-                                );
-                        }
-                    );
+            $resultsQuery->whereHas('student', function ($query) use (
+                $studentSearch,
+                $user
+            ) {
+                $query->where(function ($q) use ($studentSearch) {
+                    $q->where('full_name', 'like', "%{$studentSearch}%")
+                        ->orWhere('student_id', 'like', "%{$studentSearch}%");
+                });
 
-                    if ($user->role !== 'Manager') {
-                        $query->where(
-                            'branch_id',
-                            $user->branch_id
-                        );
-                    }
+                if ($user->role !== 'Manager') {
+                    $query->where('branch_id', $user->branch_id);
                 }
-            );
+            });
         }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Latest Results + Pagination
-        |--------------------------------------------------------------------------
-        */
 
         $results = $resultsQuery
             ->latest()
@@ -134,12 +99,12 @@ class ResultController extends Controller
                 $perPage,
                 ['*'],
                 'results_page',
-                (int) $request->query('results_page', 1)
+                max(1, (int) $request->query('results_page', 1))
             );
 
         /*
         |--------------------------------------------------------------------------
-        | Students
+        | Students With Historical Academic Sessions
         |--------------------------------------------------------------------------
         */
 
@@ -147,113 +112,134 @@ class ResultController extends Controller
             'section',
             'classInfo.subjects',
             'classGroup.subjects',
+            'studentSessions.academicSession',
+            'studentSessions.classInfo.subjects',
+            'studentSessions.classGroup.subjects',
+            'studentSessions.section',
+            'studentSessions.shift',
         ]);
 
         if ($user->role !== 'Manager') {
-            $studentsQuery->where(
-                'branch_id',
-                $user->branch_id
-            );
+            $studentsQuery->where('branch_id', $user->branch_id);
         }
 
         if ($studentSearch) {
-            $studentsQuery->where(
-                function ($query) use ($studentSearch) {
-                    $query->where(
-                        'full_name',
-                        'like',
-                        "%{$studentSearch}%"
-                    )
-                        ->orWhere(
-                            'student_id',
-                            'like',
-                            "%{$studentSearch}%"
-                        );
-                }
-            );
+            $studentsQuery->where(function ($query) use ($studentSearch) {
+                $query->where('full_name', 'like', "%{$studentSearch}%")
+                    ->orWhere('student_id', 'like', "%{$studentSearch}%");
+            });
         }
 
         $students = $studentsQuery->get();
 
         /*
         |--------------------------------------------------------------------------
-        | Group Subject Mapping
+        | Add Assigned Subjects To Each Student Session
         |--------------------------------------------------------------------------
         */
-
-        $allMappedSubjectIds = GroupSubjectMapping::query()
-            ->pluck('subject_id')
-            ->unique()
-            ->values()
-            ->toArray();
-
-        /*
-        |--------------------------------------------------------------------------
-        | Additional Subjects
-        |--------------------------------------------------------------------------
-        */
-
-        $allAdditionalSubjectIds = [];
 
         foreach ($students as $student) {
-            if (!$student->classGroup) {
-                continue;
+            foreach ($student->studentSessions as $studentSession) {
+                $subjects = collect();
+
+                if ($studentSession->classInfo) {
+                    $subjects = $subjects->merge(
+                        $studentSession->classInfo->subjects
+                    );
+                }
+
+                if ($studentSession->classGroup) {
+                    $subjects = $subjects->merge(
+                        $studentSession->classGroup->subjects
+                    );
+
+                    $mappedSubjectIds = GroupSubjectMapping::where(
+                        'class_group_id',
+                        $studentSession->class_group_id
+                    )->pluck('subject_id');
+
+                    if ($mappedSubjectIds->isNotEmpty()) {
+                        $mappedSubjects = Subject::whereIn(
+                            'id',
+                            $mappedSubjectIds
+                        )
+                            ->where('branch_id', $studentSession->branch_id)
+                            ->get();
+
+                        $subjects = $subjects->merge($mappedSubjects);
+                    }
+                }
+
+                $studentSession->setAttribute(
+                    'assigned_subjects',
+                    $subjects->unique('id')->values()
+                );
             }
 
-            foreach ($student->classGroup->subjects as $subject) {
-                $allAdditionalSubjectIds[] = $subject->id;
+            /*
+             * Keep the existing current-student assigned_subjects field
+             * for compatibility with the existing Vue page.
+             */
+
+            $subjects = collect();
+
+            if ($student->classInfo) {
+                $subjects = $subjects->merge(
+                    $student->classInfo->subjects
+                );
             }
+
+            if ($student->classGroup) {
+                $subjects = $subjects->merge(
+                    $student->classGroup->subjects
+                );
+
+                $mappedSubjectIds = GroupSubjectMapping::where(
+                    'class_group_id',
+                    $student->classGroup->id
+                )->pluck('subject_id');
+
+                if ($mappedSubjectIds->isNotEmpty()) {
+                    $mappedSubjects = Subject::whereIn(
+                        'id',
+                        $mappedSubjectIds
+                    )
+                        ->where('branch_id', $student->branch_id)
+                        ->get();
+
+                    $subjects = $subjects->merge($mappedSubjects);
+                }
+            }
+
+            $student->setAttribute(
+                'assigned_subjects',
+                $subjects->unique('id')->values()
+            );
         }
-
-        $allAdditionalSubjectIds = array_values(
-            array_unique($allAdditionalSubjectIds)
-        );
 
         /*
         |--------------------------------------------------------------------------
-        | Calculate GPA For Current Result Page
+        | Calculate GPA
         |--------------------------------------------------------------------------
         */
 
         foreach ($results->getCollection() as $result) {
             $student = $result->student;
 
-            if (!$student) {
-                continue;
-            }
-
-            /*
-            |--------------------------------------------------------------------------
-            | Result Branch Integrity
-            |--------------------------------------------------------------------------
-            */
-
             if (
-                (int) $result->branch_id !==
-                (int) $student->branch_id
+                !$student ||
+                (int) $result->branch_id !== (int) $student->branch_id
             ) {
                 $result->gpa = 0;
                 continue;
             }
 
-            /*
-            |--------------------------------------------------------------------------
-            | Examination
-            |--------------------------------------------------------------------------
-            */
-
             $examination = Examination::where(
                 'examination_type',
                 $result->exam_type
             )
-                ->where(
-                    'examination_year',
-                    $result->exam_year
-                )
-                ->where(
-                    'branch_id',
-                    $result->branch_id
-                )
+                ->where('examination_year', $result->exam_year)
+                ->where('branch_id', $result->branch_id)
                 ->first();
 
             $totalPoint = 0;
@@ -262,25 +248,14 @@ class ResultController extends Controller
             foreach ($result->resultSubjects as $resultSubject) {
                 $subject = $resultSubject->subject;
 
-                if (!$subject) {
-                    continue;
-                }
-
-                /*
-                |--------------------------------------------------------------------------
-                | Subject Branch Integrity
-                |--------------------------------------------------------------------------
-                */
-
                 if (
-                    (int) $subject->branch_id !==
-                    (int) $result->branch_id
+                    !$subject ||
+                    (int) $subject->branch_id !== (int) $result->branch_id
                 ) {
                     continue;
                 }
 
-                $fullMark =
-                    $examination?->exam_mark
+                $fullMark = $examination?->exam_mark
                     ?? $subject->full_mark
                     ?? 100;
 
@@ -288,153 +263,48 @@ class ResultController extends Controller
                     continue;
                 }
 
-                $percentage =
-                    ((float) $resultSubject->marks / (float) $fullMark)
-                    * 100;
+                $percentage = (
+                    (float) $resultSubject->marks / (float) $fullMark
+                ) * 100;
 
                 $grading = GradingSystem::where(
                     'min_percentage',
                     '<=',
                     $percentage
                 )
-                    ->orderBy(
-                        'min_percentage',
-                        'desc'
-                    )
+                    ->orderBy('min_percentage', 'desc')
                     ->first();
 
-                $point = $grading
+                $totalPoint += $grading
                     ? (float) $grading->grade_point
                     : 0;
 
-                $totalPoint += $point;
                 $subjectCount++;
             }
 
             $result->gpa = $subjectCount > 0
-                ? round(
-                    $totalPoint / $subjectCount,
-                    2
-                )
+                ? round($totalPoint / $subjectCount, 2)
                 : 0;
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Add Assigned Subjects To Students
-        |--------------------------------------------------------------------------
-        */
-
-        foreach ($students as $student) {
-            $subjects = collect();
-
-            /*
-            |--------------------------------------------------------------------------
-            | Class Subjects
-            |--------------------------------------------------------------------------
-            */
-
-            if ($student->classInfo) {
-                $subjects = $subjects->merge(
-                    $student->classInfo->subjects
-                );
-            }
-
-            /*
-            |--------------------------------------------------------------------------
-            | Group Subjects
-            |--------------------------------------------------------------------------
-            */
-
-            if ($student->classGroup) {
-                $subjects = $subjects->merge(
-                    $student->classGroup->subjects
-                );
-            }
-
-            /*
-            |--------------------------------------------------------------------------
-            | Group Subject Mapping
-            |--------------------------------------------------------------------------
-            */
-
-            if ($student->classGroup) {
-                $mappedSubjectIds =
-                    GroupSubjectMapping::where(
-                        'class_group_id',
-                        $student->classGroup->id
-                    )
-                        ->pluck('subject_id');
-
-                if ($mappedSubjectIds->isNotEmpty()) {
-                    $mappedSubjects = Subject::whereIn(
-                        'id',
-                        $mappedSubjectIds
-                    )
-                        ->where(
-                            'branch_id',
-                            $student->branch_id
-                        )
-                        ->get();
-
-                    $subjects = $subjects->merge(
-                        $mappedSubjects
-                    );
-                }
-            }
-
-            $student->assigned_subjects = $subjects
-                ->unique('id')
-                ->values();
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Response
-        |--------------------------------------------------------------------------
-        */
-
         return response()->json([
             'status' => true,
-
             'results' => $results,
-
             'students' => $students,
-
-            /*
-            |--------------------------------------------------------------------------
-            | IMPORTANT:
-            | Vue expects results_pagination
-            |--------------------------------------------------------------------------
-            */
-
             'results_pagination' => [
-                'current_page' =>
-                    $results->currentPage(),
-
-                'last_page' =>
-                    $results->lastPage(),
-
-                'per_page' =>
-                    $results->perPage(),
-
-                'total' =>
-                    $results->total(),
-
-                'from' =>
-                    $results->firstItem(),
-
-                'to' =>
-                    $results->lastItem(),
+                'current_page' => $results->currentPage(),
+                'last_page' => $results->lastPage(),
+                'per_page' => $results->perPage(),
+                'total' => $results->total(),
+                'from' => $results->firstItem(),
+                'to' => $results->lastItem(),
             ],
-
-            'total_students' =>
-                $students->count(),
+            'total_students' => $students->count(),
         ]);
     }
 
     /**
-     * Store a new result.
+     * Store a result for the explicitly selected student academic session.
      */
     public function store(Request $request): JsonResponse
     {
@@ -444,63 +314,44 @@ class ResultController extends Controller
 
         $user = $request->user();
 
-        /*
-        |--------------------------------------------------------------------------
-        | Validation
-        |--------------------------------------------------------------------------
-        */
-
         $validated = $request->validate([
             'student_id' => [
                 'required',
+                'integer',
                 'exists:students,id',
-
-                Rule::unique('results')->where(
-                    function ($query) use ($request) {
-                        return $query
-                            ->where(
-                                'exam_year',
-                                $request->exam_year
-                            )
-                            ->where(
-                                'exam_type',
-                                $request->exam_type
-                            );
-                    }
-                ),
             ],
-
+            'student_session_id' => [
+                'required',
+                'integer',
+                'exists:student_sessions,id',
+            ],
             'exam_year' => [
                 'required',
                 'string',
                 'max:255',
             ],
-
             'exam_type' => [
                 'required',
                 'string',
                 'max:255',
             ],
-
             'subjects' => [
                 'required',
                 'array',
                 'min:1',
             ],
-
             'subjects.*.subject_id' => [
                 'required',
                 'integer',
+                'distinct',
                 'exists:subjects,id',
             ],
-
             'subjects.*.marks' => [
                 'nullable',
                 'numeric',
                 'min:0',
                 'max:999.99',
             ],
-
             'subjects.*.is_additional' => [
                 'nullable',
                 'boolean',
@@ -509,15 +360,11 @@ class ResultController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Get Student
+        | Student
         |--------------------------------------------------------------------------
         */
 
-        $student = Student::with([
-            'section',
-            'classInfo.subjects',
-            'classGroup.subjects',
-        ])->find($validated['student_id']);
+        $student = Student::find($validated['student_id']);
 
         if (!$student) {
             return response()->json([
@@ -528,33 +375,95 @@ class ResultController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Student Branch Isolation
+        | Branch Isolation
         |--------------------------------------------------------------------------
         */
 
         if (
             $user->role !== 'Manager' &&
-            (int) $student->branch_id !==
-            (int) $user->branch_id
+            (int) $student->branch_id !== (int) $user->branch_id
         ) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Unauthorized access to this student.',
+                'message' => 'Unauthorized access to this student.',
             ], 403);
+        }
+
+        $resultBranchId = (int) $student->branch_id;
+
+        /*
+        |--------------------------------------------------------------------------
+        | Selected Student Session
+        |--------------------------------------------------------------------------
+        */
+
+        $studentSession = StudentSession::with([
+            'academicSession',
+            'classInfo.subjects',
+            'classGroup.subjects',
+            'section',
+            'shift',
+        ])
+            ->where('id', $validated['student_session_id'])
+            ->where('student_id', $student->id)
+            ->where('branch_id', $resultBranchId)
+            ->first();
+
+        if (!$studentSession) {
+            return response()->json([
+                'status' => false,
+                'message' => 'The selected session does not belong to this student and branch.',
+            ], 422);
+        }
+
+        if (!$studentSession->academicSession) {
+            return response()->json([
+                'status' => false,
+                'message' => 'The selected academic session could not be found.',
+            ], 422);
+        }
+
+        if (
+            (int) $studentSession->academicSession->branch_id
+            !== $resultBranchId
+        ) {
+            return response()->json([
+                'status' => false,
+                'message' => 'The academic session does not belong to this branch.',
+            ], 422);
+        }
+
+        if (
+            (string) $studentSession->academicSession->name
+            !== (string) $validated['exam_year']
+        ) {
+            return response()->json([
+                'status' => false,
+                'message' => 'The selected academic session does not match the examination year.',
+            ], 422);
         }
 
         /*
         |--------------------------------------------------------------------------
-        | Result Branch Always Comes From Student
+        | Prevent Duplicate Result
         |--------------------------------------------------------------------------
         */
 
-        $resultBranchId = $student->branch_id;
+        $duplicate = Result::where('student_id', $student->id)
+            ->where('exam_year', $validated['exam_year'])
+            ->where('exam_type', $validated['exam_type'])
+            ->exists();
+
+        if ($duplicate) {
+            return response()->json([
+                'status' => false,
+                'message' => 'A result already exists for this student, exam year and exam type.',
+            ], 422);
+        }
 
         /*
         |--------------------------------------------------------------------------
-        | Get Examination
+        | Examination
         |--------------------------------------------------------------------------
         */
 
@@ -562,261 +471,150 @@ class ResultController extends Controller
             'examination_type',
             $validated['exam_type']
         )
-            ->where(
-                'examination_year',
-                $validated['exam_year']
-            )
-            ->where(
-                'branch_id',
-                $resultBranchId
-            )
+            ->where('examination_year', $validated['exam_year'])
+            ->where('branch_id', $resultBranchId)
             ->first();
 
         if (!$examination) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Examination not found for this branch.',
+                'message' => 'Examination not found for this branch.',
             ], 422);
         }
 
         /*
         |--------------------------------------------------------------------------
-        | Build Assigned Subject IDs
+        | Assigned Subjects From The Selected Session
         |--------------------------------------------------------------------------
         */
 
         $assignedSubjectIds = collect();
 
-        /*
-        |--------------------------------------------------------------------------
-        | Class Subjects
-        |--------------------------------------------------------------------------
-        */
-
-        if ($student->classInfo) {
-            $classSubjectIds =
-                $student->classInfo->subjects
-                    ->pluck('id');
-
-            $assignedSubjectIds =
-                $assignedSubjectIds->merge(
-                    $classSubjectIds
-                );
+        if ($studentSession->classInfo) {
+            $assignedSubjectIds = $assignedSubjectIds->merge(
+                $studentSession->classInfo->subjects->pluck('id')
+            );
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Group Subjects
-        |--------------------------------------------------------------------------
-        */
+        if ($studentSession->classGroup) {
+            $assignedSubjectIds = $assignedSubjectIds->merge(
+                $studentSession->classGroup->subjects->pluck('id')
+            );
 
-        if ($student->classGroup) {
-            $groupSubjectIds =
-                $student->classGroup->subjects
-                    ->pluck('id');
+            $mappedSubjectIds = GroupSubjectMapping::where(
+                'class_group_id',
+                $studentSession->class_group_id
+            )->pluck('subject_id');
 
-            $assignedSubjectIds =
-                $assignedSubjectIds->merge(
-                    $groupSubjectIds
-                );
+            $assignedSubjectIds = $assignedSubjectIds->merge(
+                $mappedSubjectIds
+            );
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Group Subject Mapping
-        |--------------------------------------------------------------------------
-        */
+        $assignedSubjectIds = $assignedSubjectIds
+            ->unique()
+            ->values();
 
-        if ($student->classGroup) {
-            $mappedSubjectIds =
-                GroupSubjectMapping::where(
-                    'class_group_id',
-                    $student->classGroup->id
-                )
-                    ->pluck('subject_id');
-
-            $assignedSubjectIds =
-                $assignedSubjectIds->merge(
-                    $mappedSubjectIds
-                );
-        }
-
-        $assignedSubjectIds =
-            $assignedSubjectIds
-                ->unique()
-                ->values();
-
-        /*
-        |--------------------------------------------------------------------------
-        | Explicit Subject Branch Validation
-        |
-        | Every submitted subject must:
-        | 1. Exist
-        | 2. Belong to student's branch
-        | 3. Be assigned to this student
-        |--------------------------------------------------------------------------
-        */
-
-        $submittedSubjectIds = collect(
-            $validated['subjects']
-        )
+        $submittedSubjectIds = collect($validated['subjects'])
             ->pluck('subject_id')
             ->unique()
             ->values();
 
-        $invalidBranchSubjectExists =
-            Subject::whereIn(
-                'id',
-                $submittedSubjectIds
-            )
-                ->where(
-                    'branch_id',
-                    '!=',
-                    $resultBranchId
-                )
-                ->exists();
+        $subjects = Subject::whereIn('id', $submittedSubjectIds)
+            ->where('branch_id', $resultBranchId)
+            ->get()
+            ->keyBy('id');
 
-        if ($invalidBranchSubjectExists) {
+        if ($subjects->count() !== $submittedSubjectIds->count()) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'One or more selected subjects do not belong to the student branch.',
+                'message' => 'One or more selected subjects do not belong to the student branch.',
             ], 422);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Assigned Subject Validation
-        |--------------------------------------------------------------------------
-        */
-
         foreach ($submittedSubjectIds as $subjectId) {
-            if (
-                !$assignedSubjectIds->contains(
-                    $subjectId
-                )
-            ) {
+            if (!$assignedSubjectIds->contains($subjectId)) {
                 return response()->json([
                     'status' => false,
-                    'message' =>
-                        "Subject ID {$subjectId} is not assigned to this student.",
+                    'message' => "Subject ID {$subjectId} is not assigned to the selected session's class or group.",
                 ], 422);
             }
         }
 
         /*
         |--------------------------------------------------------------------------
-        | Validate Marks Against Examination Mark / Subject Full Mark
+        | Validate Marks
         |--------------------------------------------------------------------------
         */
 
         foreach ($validated['subjects'] as $subjectData) {
-            $subject = Subject::where(
-                'id',
-                $subjectData['subject_id']
-            )
-                ->where(
-                    'branch_id',
-                    $resultBranchId
-                )
-                ->first();
+            $subject = $subjects->get($subjectData['subject_id']);
 
-            if (!$subject) {
+            $fullMark = $examination->exam_mark !== null
+                ? (float) $examination->exam_mark
+                : (float) ($subject->full_mark ?? 100);
+
+            $marks = $subjectData['marks'] ?? null;
+
+            if ($marks !== null && (float) $marks > $fullMark) {
                 return response()->json([
                     'status' => false,
-                    'message' =>
-                        'Selected subject does not belong to the student branch.',
-                ], 422);
-            }
-
-            $fullMark =
-                $examination->exam_mark !== null
-                    ? (float) $examination->exam_mark
-                    : (float) ($subject->full_mark ?? 100);
-
-            $marks =
-                $subjectData['marks'] ?? null;
-
-            if (
-                $marks !== null &&
-                (float) $marks > $fullMark
-            ) {
-                return response()->json([
-                    'status' => false,
-                    'message' =>
-                        "Marks for {$subject->subject_name} cannot exceed {$fullMark}.",
+                    'message' => "Marks for {$subject->subject_name} cannot exceed {$fullMark}.",
                 ], 422);
             }
         }
 
         /*
         |--------------------------------------------------------------------------
-        | Create Result
-        |
-        | IMPORTANT FIX:
-        | branch_id is assigned directly so it cannot be skipped
-        | by Result model $fillable configuration.
+        | Create Result With Historical Snapshots
         |--------------------------------------------------------------------------
         */
 
-        $result = new Result();
+        $result = Result::create([
+            'student_id' => $student->id,
+            'student_session_id' => $studentSession->id,
+            'exam_year' => $validated['exam_year'],
+            'exam_type' => $validated['exam_type'],
+            'branch_id' => $resultBranchId,
 
-        $result->student_id =
-            $student->id;
+            'class_name_snapshot' =>
+                $studentSession->classInfo?->class_name
+                ?? $studentSession->classInfo?->name,
 
-        $result->exam_year =
-            $validated['exam_year'];
+            'section_name_snapshot' =>
+                $studentSession->section?->section_name
+                ?? $studentSession->section?->name,
 
-        $result->exam_type =
-            $validated['exam_type'];
+            'shift_name_snapshot' =>
+                $studentSession->shift?->shift_name
+                ?? $studentSession->shift?->name,
 
-        $result->branch_id =
-            $resultBranchId;
-
-        $result->save();
-
-        /*
-        |--------------------------------------------------------------------------
-        | Create Result Subjects
-        |--------------------------------------------------------------------------
-        */
+            'class_group_name_snapshot' =>
+                $studentSession->classGroup?->class_group_name
+                ?? $studentSession->classGroup?->group_name
+                ?? $studentSession->classGroup?->name,
+        ]);
 
         foreach ($validated['subjects'] as $subjectData) {
             $result->resultSubjects()->create([
-                'subject_id' =>
-                    $subjectData['subject_id'],
-
-                'marks' =>
-                    $subjectData['marks'] ?? null,
+                'subject_id' => $subjectData['subject_id'],
+                'marks' => $subjectData['marks'] ?? null,
             ]);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Reload Complete Result
-        |--------------------------------------------------------------------------
-        */
-
         $result->load([
-            'student.section',
-            'student.classInfo',
-            'student.classGroup',
+            'student',
+            'studentSession.academicSession',
+            'studentSession.classInfo',
+            'studentSession.section',
+            'studentSession.shift',
+            'studentSession.classGroup',
             'resultSubjects.subject',
         ]);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Response
-        |--------------------------------------------------------------------------
-        */
-
         return response()->json([
             'status' => true,
-
-            'message' =>
-                'Result created successfully.',
-
+            'message' => 'Result created successfully.',
             'data' => $result,
         ], 201);
     }
@@ -834,16 +632,15 @@ class ResultController extends Controller
 
         $user = $request->user();
 
-        /*
-        |--------------------------------------------------------------------------
-        | Load Result
-        |--------------------------------------------------------------------------
-        */
-
         $result = Result::with([
             'student.section',
             'student.classInfo',
             'student.classGroup.subjects',
+            'studentSession.academicSession',
+            'studentSession.classInfo',
+            'studentSession.section',
+            'studentSession.shift',
+            'studentSession.classGroup.subjects',
             'resultSubjects.subject',
         ])->find($id);
 
@@ -854,96 +651,64 @@ class ResultController extends Controller
             ], 404);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Result Branch Isolation / IDOR
-        |--------------------------------------------------------------------------
-        */
-
         if (
             $user->role !== 'Manager' &&
-            (int) $result->branch_id !==
-            (int) $user->branch_id
+            (int) $result->branch_id !== (int) $user->branch_id
         ) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Unauthorized access to this result.',
+                'message' => 'Unauthorized access to this result.',
             ], 403);
         }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Student Branch Integrity
-        |--------------------------------------------------------------------------
-        */
 
         if (
             !$result->student ||
-            (int) $result->student->branch_id !==
-            (int) $result->branch_id
+            (int) $result->student->branch_id !== (int) $result->branch_id
         ) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Result branch does not match student branch.',
+                'message' => 'Result branch does not match student branch.',
             ], 403);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Examination
-        |--------------------------------------------------------------------------
-        */
+        if (
+            $result->studentSession &&
+            (
+                (int) $result->studentSession->student_id
+                    !== (int) $result->student_id ||
+                (int) $result->studentSession->branch_id
+                    !== (int) $result->branch_id
+            )
+        ) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Result session does not match the student or branch.',
+            ], 403);
+        }
 
         $examination = Examination::where(
             'examination_type',
             $result->exam_type
         )
-            ->where(
-                'examination_year',
-                $result->exam_year
-            )
-            ->where(
-                'branch_id',
-                $result->branch_id
-            )
+            ->where('examination_year', $result->exam_year)
+            ->where('branch_id', $result->branch_id)
             ->first();
 
-        /*
-        |--------------------------------------------------------------------------
-        | Build Subjects
-        |--------------------------------------------------------------------------
-        */
-
         $subjects = [];
-
         $totalPoint = 0;
-
         $subjectCount = 0;
 
         foreach ($result->resultSubjects as $resultSubject) {
             $subject = $resultSubject->subject;
 
-            if (!$subject) {
-                continue;
-            }
-
-            /*
-            |--------------------------------------------------------------------------
-            | Subject Branch Integrity
-            |--------------------------------------------------------------------------
-            */
-
             if (
-                (int) $subject->branch_id !==
-                (int) $result->branch_id
+                !$subject ||
+                (int) $subject->branch_id !== (int) $result->branch_id
             ) {
                 continue;
             }
 
-            $fullMark =
-                $examination?->exam_mark
+            $fullMark = $examination?->exam_mark
                 ?? $subject->full_mark
                 ?? 100;
 
@@ -951,138 +716,95 @@ class ResultController extends Controller
                 continue;
             }
 
-            $marks =
-                $resultSubject->marks ?? 0;
+            $marks = $resultSubject->marks ?? 0;
 
-            $percentage =
-                ((float) $marks / (float) $fullMark)
-                * 100;
+            $percentage = (
+                (float) $marks / (float) $fullMark
+            ) * 100;
 
             $grading = GradingSystem::where(
                 'min_percentage',
                 '<=',
                 $percentage
             )
-                ->orderBy(
-                    'min_percentage',
-                    'desc'
-                )
+                ->orderBy('min_percentage', 'desc')
                 ->first();
 
-            $grade =
-                $grading?->grade
-                ?? 'F';
-
-            $point =
-                $grading
-                    ? (float) $grading->grade_point
-                    : 0;
+            $grade = $grading?->grade ?? 'F';
+            $point = $grading ? (float) $grading->grade_point : 0;
 
             $totalPoint += $point;
-
             $subjectCount++;
 
             $isAdditional = false;
 
-            if ($result->student?->classGroup) {
-                $isAdditional =
-                    $result->student
-                        ->classGroup
-                        ->subjects
-                        ->contains(
-                            'id',
-                            $subject->id
-                        );
+            if ($result->studentSession?->classGroup) {
+                $isAdditional = $result->studentSession
+                    ->classGroup
+                    ->subjects
+                    ->contains('id', $subject->id);
             }
 
             $subjects[] = [
-                'id' =>
-                    $subject->id,
-
-                'name' =>
-                    $subject->subject_name
+                'id' => $subject->id,
+                'name' => $subject->subject_name
                     ?? $subject->name
                     ?? 'Unknown Subject',
-
-                'marks' =>
-                    (float) $marks,
-
-                'full_mark' =>
-                    (float) $fullMark,
-
-                'percentage' =>
-                    round(
-                        $percentage,
-                        2
-                    ),
-
-                'grade' =>
-                    $grade,
-
-                'grade_point' =>
-                    $point,
-
-                'is_additional' =>
-                    $isAdditional,
+                'marks' => (float) $marks,
+                'full_mark' => (float) $fullMark,
+                'percentage' => round($percentage, 2),
+                'grade' => $grade,
+                'grade_point' => $point,
+                'is_additional' => $isAdditional,
             ];
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | GPA
-        |--------------------------------------------------------------------------
-        */
-
         $gpa = $subjectCount > 0
-            ? round(
-                $totalPoint / $subjectCount,
-                2
-            )
+            ? round($totalPoint / $subjectCount, 2)
             : 0;
 
         $gpa = min(5, $gpa);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Response
-        |--------------------------------------------------------------------------
-        */
-
         return response()->json([
             'status' => true,
-
             'data' => [
-                'id' =>
-                    $result->id,
+                'id' => $result->id,
+                'student' => $result->student,
+                'student_session' => $result->studentSession,
 
-                'student' =>
-                    $result->student,
+                'class_name_snapshot' =>
+                    $result->class_name_snapshot
+                    ?? $result->studentSession?->classInfo?->class_name
+                    ?? $result->studentSession?->classInfo?->name,
 
-                'exam_year' =>
-                    $result->exam_year,
+                'section_name_snapshot' =>
+                    $result->section_name_snapshot
+                    ?? $result->studentSession?->section?->section_name
+                    ?? $result->studentSession?->section?->name,
 
-                'exam_type' =>
-                    $result->exam_type,
+                'shift_name_snapshot' =>
+                    $result->shift_name_snapshot
+                    ?? $result->studentSession?->shift?->shift_name
+                    ?? $result->studentSession?->shift?->name,
 
-                'branch_id' =>
-                    $result->branch_id,
+                'class_group_name_snapshot' =>
+                    $result->class_group_name_snapshot
+                    ?? $result->studentSession?->classGroup?->class_group_name
+                    ?? $result->studentSession?->classGroup?->group_name
+                    ?? $result->studentSession?->classGroup?->name,
 
-                'examination' =>
-                    $examination,
-
-                'subjects' =>
-                    $subjects,
-
-                'gpa' =>
-                    $gpa,
+                'exam_year' => $result->exam_year,
+                'exam_type' => $result->exam_type,
+                'branch_id' => $result->branch_id,
+                'examination' => $examination,
+                'subjects' => $subjects,
+                'gpa' => $gpa,
             ],
         ]);
     }
 
     /**
      * Edit result.
-     *
-     * Currently not implemented.
      */
     public function edit(Result $result)
     {
@@ -1091,48 +813,33 @@ class ResultController extends Controller
 
     /**
      * Update result.
-     *
-     * Currently not implemented.
      */
-    public function update(
-        Request $request,
-        Result $result
-    ) {
+    public function update(Request $request, Result $result)
+    {
         if ($response = $this->authorizeAccess($request)) {
             return $response;
         }
 
         $user = $request->user();
 
-        /*
-        |--------------------------------------------------------------------------
-        | IDOR Protection
-        |--------------------------------------------------------------------------
-        */
-
         if (
             $user->role !== 'Manager' &&
-            (int) $result->branch_id !==
-            (int) $user->branch_id
+            (int) $result->branch_id !== (int) $user->branch_id
         ) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Unauthorized access to this result.',
+                'message' => 'Unauthorized access to this result.',
             ], 403);
         }
 
         return response()->json([
             'status' => false,
-            'message' =>
-                'Result update is not implemented.',
+            'message' => 'Result update is not implemented.',
         ], 501);
     }
 
     /**
      * Delete result.
-     *
-     * Currently not implemented.
      */
     public function destroy(Result $result)
     {
@@ -1144,28 +851,19 @@ class ResultController extends Controller
 
         $user = $request->user();
 
-        /*
-        |--------------------------------------------------------------------------
-        | IDOR Protection
-        |--------------------------------------------------------------------------
-        */
-
         if (
             $user->role !== 'Manager' &&
-            (int) $result->branch_id !==
-            (int) $user->branch_id
+            (int) $result->branch_id !== (int) $user->branch_id
         ) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Unauthorized access to this result.',
+                'message' => 'Unauthorized access to this result.',
             ], 403);
         }
 
         return response()->json([
             'status' => false,
-            'message' =>
-                'Result deletion is not implemented.',
+            'message' => 'Result deletion is not implemented.',
         ], 501);
     }
 }

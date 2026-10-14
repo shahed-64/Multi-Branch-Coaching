@@ -1,41 +1,27 @@
 <?php
 
 namespace App\Http\Controllers;
-
 use App\Models\Student;
 use App\Models\Payment;
+use App\Models\AcademicSession;
+use App\Models\StudentSession;
+use App\Models\Section;
+use App\Models\ClssM;
+use App\Models\ClassGroup;
+use App\Models\Shift;
 use App\Services\BranchContext;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Carbon\Carbon;
 
 class StudentController extends Controller
 {
-    /**
-     * --------------------------------------------------------------------------
-     * Check whether authenticated user can access Student module.
-     * --------------------------------------------------------------------------
-     *
-     * Allowed:
-     * - Manager
-     * - Branch Manager
-     * - Admin
-     * - Branch Admin
-     *
-     * Not allowed:
-     * - Accountant
-     * - Branch Accountant
-     * --------------------------------------------------------------------------
-     */
     private function canAccessModule($authUser): bool
     {
-        if (!$authUser) {
-            return false;
-        }
-
-        return in_array($authUser->role, [
+        return $authUser && in_array($authUser->role, [
             'Manager',
             'Branch Manager',
             'Admin',
@@ -43,102 +29,42 @@ class StudentController extends Controller
         ]);
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * Get current branch context.
-     * --------------------------------------------------------------------------
-     *
-     * Manager:
-     * - Selected branch from sidebar => that branch
-     * - All Branches => null
-     *
-     * Non-Manager:
-     * - Their own assigned branch
-     *
-     * BranchContextMiddleware already determines this.
-     * --------------------------------------------------------------------------
-     */
     private function currentBranchId(): ?int
     {
         return app(BranchContext::class)->id();
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * Check whether authenticated user can access this student.
-     * --------------------------------------------------------------------------
-     *
-     * Current branch context is respected.
-     *
-     * Manager:
-     * - All Branches => can access all branches.
-     * - Selected Branch => only selected branch.
-     *
-     * Other authorized roles:
-     * - Only their current/assigned branch.
-     * --------------------------------------------------------------------------
-     */
-    private function canAccessStudent(
-        $authUser,
-        Student $student
-    ): bool {
-        if (!$authUser) {
-            return false;
-        }
-
-        if (!$this->canAccessModule($authUser)) {
+    private function canAccessStudent($authUser, Student $student): bool
+    {
+        if (!$authUser || !$this->canAccessModule($authUser)) {
             return false;
         }
 
         $currentBranchId = $this->currentBranchId();
 
-        /**
-         * All Branches context.
-         *
-         * Only Manager can have an unrestricted
-         * All Branches context.
-         */
         if (
-            $currentBranchId === null
-            && $authUser->role === 'Manager'
+            $currentBranchId === null &&
+            $authUser->role === 'Manager'
         ) {
             return true;
         }
 
-        /**
-         * Current branch must exist for every
-         * branch-scoped access.
-         */
         if ($currentBranchId === null) {
             return false;
         }
 
-        /**
-         * Student must belong to current branch.
-         */
         return $student->branch_id !== null
             && (int) $student->branch_id === (int) $currentBranchId;
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * Forbidden response.
-     * --------------------------------------------------------------------------
-     */
-    private function forbidden(
-        $message = 'Access denied.'
-    ) {
+    private function forbidden($message = 'Access denied.')
+    {
         return response()->json([
             'status' => false,
             'message' => $message,
         ], 403);
     }
 
-    /**
-     * --------------------------------------------------------------------------
-     * Authentication response.
-     * --------------------------------------------------------------------------
-     */
     private function unauthenticated()
     {
         return response()->json([
@@ -148,65 +74,131 @@ class StudentController extends Controller
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * Display a listing of students.
-     * --------------------------------------------------------------------------
+     * Validate the selected academic session belongs to the branch.
+     */
+    private function getAcademicSessionForBranch(
+        $sessionId,
+        $branchId
+    ): ?AcademicSession {
+        return AcademicSession::where('id', $sessionId)
+            ->where('branch_id', $branchId)
+            ->first();
+    }
+
+    /**
+     * Validate academic records belong to the selected branch.
+     */
+    private function validateAcademicDetails(
+        Request $request,
+        $branchId
+    ) {
+        $checks = [
+            [
+                'model' => Section::class,
+                'id' => $request->section_id,
+                'message' => 'Selected section does not belong to this branch.',
+            ],
+            [
+                'model' => ClssM::class,
+                'id' => $request->class_id,
+                'message' => 'Selected class does not belong to this branch.',
+            ],
+            [
+                'model' => ClassGroup::class,
+                'id' => $request->class_group_id,
+                'message' => 'Selected class group does not belong to this branch.',
+            ],
+            [
+                'model' => Shift::class,
+                'id' => $request->shift_id,
+                'message' => 'Selected shift does not belong to this branch.',
+            ],
+        ];
+
+        foreach ($checks as $check) {
+            $record = $check['model']::find($check['id']);
+
+            if (
+                !$record ||
+                (int) $record->branch_id !== (int) $branchId
+            ) {
+                return response()->json([
+                    'status' => false,
+                    'message' => $check['message'],
+                ], 422);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Determine the branch for a new student.
+     */
+    private function resolveCreateBranch(Request $request, $authUser)
+    {
+        $currentBranchId = $this->currentBranchId();
+
+        if ($currentBranchId !== null) {
+            return $currentBranchId;
+        }
+
+        if ($authUser->role !== 'Manager') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Your account is not assigned to any branch.',
+            ], 403);
+        }
+
+        if (!$request->branch_id) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Branch is required when All Branches is selected.',
+            ], 422);
+        }
+
+        return (int) $request->branch_id;
+    }
+
+    /**
+     * Display students with session-wise academic and payment information.
      */
     public function index(Request $request)
     {
         $authUser = $request->user();
 
-        /**
-         * Authentication check.
-         */
         if (!$authUser) {
             return $this->unauthenticated();
         }
 
-        /**
-         * Role authorization.
-         *
-         * Accountant / Branch Accountant are blocked here.
-         */
         if (!$this->canAccessModule($authUser)) {
             return $this->forbidden(
                 'You are not authorized to access students.'
             );
         }
 
-        /**
-         * Current branch comes from central BranchContext.
-         */
         $currentBranchId = $this->currentBranchId();
 
-        /**
-         * Non-Manager must have a branch context.
-         */
         if (
-            $authUser->role !== 'Manager'
-            && $currentBranchId === null
+            $authUser->role !== 'Manager' &&
+            $currentBranchId === null
         ) {
             return $this->forbidden(
                 'Your account is not assigned to any branch.'
             );
         }
 
-        $perPage = (int) $request->get(
-            'per_page',
-            10
-        );
-
         $perPage = min(
-            max($perPage, 1),
+            max((int) $request->get('per_page', 10), 1),
             100
         );
 
-        $search = trim(
-            $request->get('search', '')
-        );
-
+        $search = trim($request->get('search', ''));
         $classId = $request->get('class_id');
 
+        /*
+         * Load student information and legacy student-level payments.
+         */
         $query = Student::with([
             'section',
             'classInfo',
@@ -222,75 +214,82 @@ class StudentController extends Controller
                     'due_amount',
                     'status'
                 );
-            }
+            },
         ])->orderBy('id', 'desc');
 
-        /**
-         * ----------------------------------------------------------------------
-         * BRANCH FILTER
-         * ----------------------------------------------------------------------
-         *
-         * Manager + All Branches:
-         * - currentBranchId = null
-         * - No branch filter.
-         *
-         * Manager + Selected Branch:
-         * - Filter by selected branch.
-         *
-         * Non-Manager:
-         * - BranchContext contains their own branch.
-         */
         if ($currentBranchId !== null) {
-            $query->where(
-                'branch_id',
-                $currentBranchId
-            );
+            $query->where('branch_id', $currentBranchId);
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * SEARCH
-         * ----------------------------------------------------------------------
-         */
         if ($search !== '') {
             $query->where(function ($q) use ($search) {
-                $q->where(
-                    'full_name',
-                    'like',
-                    '%' . $search . '%'
-                )
-                    ->orWhere(
-                        'email',
-                        'like',
-                        '%' . $search . '%'
-                    )
-                    ->orWhere(
-                        'student_id',
-                        'like',
-                        '%' . $search . '%'
-                    );
+                $q->where('full_name', 'like', '%' . $search . '%')
+                    ->orWhere('email', 'like', '%' . $search . '%')
+                    ->orWhere('student_id', 'like', '%' . $search . '%');
             });
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * CLASS FILTER
-         * ----------------------------------------------------------------------
+        /*
+         * IMPORTANT:
+         * Filter by the latest student-session enrollment first,
+         * instead of always filtering the old students.class_id.
+         *
+         * This uses the project's existing rule that the greatest
+         * academic_session_id represents the latest session.
+         * Students without any enrollment retain the legacy filter.
          */
         if (!empty($classId)) {
-            $query->where(
-                'class_id',
-                $classId
-            );
+            $query->where(function ($q) use ($classId) {
+                $q->whereHas('studentSessions', function ($enrollmentQuery) use ($classId) {
+                    $enrollmentQuery
+                        ->where('class_id', $classId)
+                        ->whereRaw(
+                            'student_sessions.academic_session_id = (
+                                SELECT MAX(ss_latest.academic_session_id)
+                                FROM student_sessions AS ss_latest
+                                WHERE ss_latest.student_id = student_sessions.student_id
+                            )'
+                        );
+                })->orWhere(function ($legacyQuery) use ($classId) {
+                    $legacyQuery
+                        ->whereDoesntHave('studentSessions')
+                        ->where('class_id', $classId);
+                });
+            });
         }
 
         $students = $query->paginate($perPage);
 
-        /**
-         * ----------------------------------------------------------------------
-         * MONTH CALCULATION
-         * ----------------------------------------------------------------------
+        $studentIds = collect($students->items())
+            ->pluck('id')
+            ->all();
+
+        /*
+         * Load every enrollment with its own academic details and payments.
          */
+        $enrollments = StudentSession::with([
+            'academicSession',
+            'classInfo',
+            'section',
+            'shift',
+            'classGroup',
+            'payments' => function ($q) {
+                $q->select(
+                    'id',
+                    'student_id',
+                    'student_session_id',
+                    'month',
+                    'paid_amount',
+                    'due_amount',
+                    'status'
+                );
+            },
+        ])
+            ->whereIn('student_id', $studentIds)
+            ->orderBy('academic_session_id', 'desc')
+            ->get()
+            ->groupBy('student_id');
+
         $allMonths = [
             'January',
             'February',
@@ -303,81 +302,90 @@ class StudentController extends Controller
             'September',
             'October',
             'November',
-            'December'
+            'December',
         ];
 
         $currentMonth = Carbon::now()->month;
 
         foreach ($students->items() as $student) {
+            /*
+             * Preserve existing student-level month calculations.
+             */
+            $paidMonths = $student->payments
+                ->pluck('month')
+                ->toArray();
 
-            $paidMonths =
-                $student->payments
-                    ->pluck('month')
-                    ->toArray();
+            $admissionMonth = $student->admission_date
+                ? Carbon::parse($student->admission_date)->month
+                : 1;
 
-            $admissionMonth =
-                $student->admission_date
-                    ? Carbon::parse(
-                        $student->admission_date
-                    )->month
-                    : 1;
+            $monthsTillNow = array_slice(
+                $allMonths,
+                $admissionMonth - 1,
+                max(0, $currentMonth - $admissionMonth + 1)
+            );
 
-            $monthsTillNow =
-                array_slice(
-                    $allMonths,
-                    $admissionMonth - 1,
-                    max(
-                        0,
-                        $currentMonth -
-                        $admissionMonth +
-                        1
-                    )
-                );
+            $dueMonths = array_values(
+                array_diff($monthsTillNow, $paidMonths)
+            );
 
-            $dueMonths =
-                array_values(
-                    array_diff(
-                        $monthsTillNow,
-                        $paidMonths
-                    )
-                );
+            $monthsTillDecember = array_slice(
+                $allMonths,
+                $admissionMonth - 1
+            );
 
-            $monthsTillDecember =
-                array_slice(
+            $availableMonths = array_values(
+                array_diff($monthsTillDecember, $paidMonths)
+            );
+
+            /*
+             * Attach session-wise payment month information.
+             */
+            $studentEnrollments = $enrollments
+                ->get($student->id, collect())
+                ->values();
+
+            foreach ($studentEnrollments as $enrollment) {
+                $sessionMonths = array_slice(
                     $allMonths,
                     $admissionMonth - 1
                 );
 
-            $availableMonths =
-                array_values(
+                $sessionPaidMonths = $enrollment->payments
+                    ->pluck('month')
+                    ->toArray();
+
+                $sessionAvailableMonths = array_values(
                     array_diff(
-                        $monthsTillDecember,
-                        $paidMonths
+                        $sessionMonths,
+                        $sessionPaidMonths
                     )
                 );
 
-            $student->setAttribute(
-                'due_months',
-                $dueMonths
-            );
+                $enrollment->setAttribute(
+                    'available_months',
+                    $sessionAvailableMonths
+                );
+            }
+
+            $student->setAttribute('due_months', $dueMonths);
 
             $student->setAttribute(
                 'available_months',
                 $availableMonths
             );
+
+            $student->setAttribute(
+                'student_sessions',
+                $studentEnrollments
+            );
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * TOTAL STUDENTS
-         * ----------------------------------------------------------------------
+        /*
+         * Preserve the existing total-student count and branch scope.
          */
-        $totalStudentsQuery =
-            Student::query();
+        $totalStudentsQuery = Student::query();
 
-        /**
-         * Same current branch context as the main list.
-         */
         if ($currentBranchId !== null) {
             $totalStudentsQuery->where(
                 'branch_id',
@@ -385,59 +393,32 @@ class StudentController extends Controller
             );
         }
 
-        $totalStudents =
-            $totalStudentsQuery->count();
-
         return response()->json([
             'status' => true,
-
-            'students' =>
-                $students->items(),
-
+            'students' => $students->items(),
             'pagination' => [
-                'current_page' =>
-                    $students->currentPage(),
-
-                'last_page' =>
-                    $students->lastPage(),
-
-                'per_page' =>
-                    $students->perPage(),
-
-                'total' =>
-                    $students->total(),
-
-                'from' =>
-                    $students->firstItem(),
-
-                'to' =>
-                    $students->lastItem(),
+                'current_page' => $students->currentPage(),
+                'last_page' => $students->lastPage(),
+                'per_page' => $students->perPage(),
+                'total' => $students->total(),
+                'from' => $students->firstItem(),
+                'to' => $students->lastItem(),
             ],
-
-            'total_students' =>
-                $totalStudents,
+            'total_students' => $totalStudentsQuery->count(),
         ]);
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * Store a newly created student.
-     * --------------------------------------------------------------------------
+     * Create student and first academic-session enrollment.
      */
     public function store(Request $request)
     {
         $authUser = $request->user();
 
-        /**
-         * Authentication check.
-         */
         if (!$authUser) {
             return $this->unauthenticated();
         }
 
-        /**
-         * Role authorization.
-         */
         if (!$this->canAccessModule($authUser)) {
             return $this->forbidden(
                 'You are not authorized to create students.'
@@ -445,875 +426,502 @@ class StudentController extends Controller
         }
 
         $request->validate([
-            'full_name' =>
-                'required|string|max:255',
-
-            'version' =>
-                'required|string|max:50',
-
-            'fathers_name' =>
-                'required|string|max:255',
-
-            'mothers_name' =>
-                'required|string|max:255',
-
-            'phone' =>
-                'required|string|max:20',
-
-            'section_id' =>
-                'required|exists:sections,id',
-
-            'class_id' =>
-                'required|exists:clss_m_s,id',
-
-            'class_group_id' =>
-                'required|exists:class_groups,id',
-
-            'shift_id' =>
-                'required|exists:shifts,id',
-
-            'course_name' =>
-                'nullable|string|max:100',
-
-            'admission_date' =>
-                'nullable|date',
-
-            'email' =>
-                'required|email|unique:students,email',
-
-            'image' =>
-                'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
-
-            'monthly_fee' =>
-                'nullable|numeric',
-
-            'branch_id' =>
-                'nullable|exists:branches,id',
+            'full_name' => 'required|string|max:255',
+            'version' => 'required|string|max:50',
+            'fathers_name' => 'required|string|max:255',
+            'mothers_name' => 'required|string|max:255',
+            'phone' => 'required|string|max:20',
+            'academic_session_id' => 'required|integer|exists:academic_sessions,id',
+            'section_id' => 'required|integer|exists:sections,id',
+            'class_id' => 'required|integer|exists:clss_m_s,id',
+            'class_group_id' => 'required|integer|exists:class_groups,id',
+            'shift_id' => 'required|integer|exists:shifts,id',
+            'course_name' => 'nullable|string|max:100',
+            'admission_date' => 'nullable|date',
+            'email' => 'required|email|unique:students,email',
+            'image' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'monthly_fee' => 'nullable|numeric|min:0',
+            'branch_id' => 'nullable|exists:branches,id',
         ]);
 
-        /**
-         * ----------------------------------------------------------------------
-         * DETERMINE BRANCH FROM CURRENT CONTEXT
-         * ----------------------------------------------------------------------
-         *
-         * Manager + selected branch:
-         * - Student MUST be created in selected branch.
-         * - Frontend branch_id cannot override current context.
-         *
-         * Manager + All Branches:
-         * - Manager must select branch_id from request.
-         *
-         * Non-Manager:
-         * - Current BranchContext is their own branch.
-         */
-        $currentBranchId = $this->currentBranchId();
+        $branchId = $this->resolveCreateBranch($request, $authUser);
 
-        if ($currentBranchId !== null) {
-
-            $branchId = $currentBranchId;
-
-        } else {
-
-            /**
-             * All Branches is only possible for Manager.
-             */
-            if ($authUser->role !== 'Manager') {
-                return $this->forbidden(
-                    'Your account is not assigned to any branch.'
-                );
-            }
-
-            if (!$request->branch_id) {
-                return response()->json([
-                    'status' => false,
-                    'message' =>
-                        'Branch is required when All Branches is selected.'
-                ], 422);
-            }
-
-            $branchId =
-                $request->branch_id;
+        if ($branchId instanceof \Illuminate\Http\JsonResponse) {
+            return $branchId;
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * VERIFY SECTION BRANCH
-         * ----------------------------------------------------------------------
-         */
-        $section =
-            \App\Models\Section::find(
-                $request->section_id
-            );
+        $academicSession = $this->getAcademicSessionForBranch(
+            $request->academic_session_id,
+            $branchId
+        );
 
-        if (
-            !$section ||
-            (int) $section->branch_id !== (int) $branchId
-        ) {
+        if (!$academicSession) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Selected section does not belong to the selected branch.'
+                'message' => 'Selected academic session does not belong to this branch.',
             ], 422);
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * VERIFY CLASS BRANCH
-         * ----------------------------------------------------------------------
-         */
-        $class =
-            \App\Models\ClssM::find(
-                $request->class_id
-            );
+        $academicError = $this->validateAcademicDetails(
+            $request,
+            $branchId
+        );
 
-        if (
-            !$class ||
-            (int) $class->branch_id !== (int) $branchId
-        ) {
-            return response()->json([
-                'status' => false,
-                'message' =>
-                    'Selected class does not belong to the selected branch.'
-            ], 422);
+        if ($academicError) {
+            return $academicError;
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * VERIFY CLASS GROUP BRANCH
-         * ----------------------------------------------------------------------
-         */
-        $classGroup =
-            \App\Models\ClassGroup::find(
-                $request->class_group_id
-            );
-
-        if (
-            !$classGroup ||
-            (int) $classGroup->branch_id !== (int) $branchId
-        ) {
-            return response()->json([
-                'status' => false,
-                'message' =>
-                    'Selected class group does not belong to the selected branch.'
-            ], 422);
-        }
-
-        /**
-         * ----------------------------------------------------------------------
-         * VERIFY SHIFT BRANCH
-         * ----------------------------------------------------------------------
-         */
-        $shift =
-            \App\Models\Shift::find(
-                $request->shift_id
-            );
-
-        if (
-            !$shift ||
-            (int) $shift->branch_id !== (int) $branchId
-        ) {
-            return response()->json([
-                'status' => false,
-                'message' =>
-                    'Selected shift does not belong to the selected branch.'
-            ], 422);
-        }
-
-        /**
-         * ----------------------------------------------------------------------
-         * IMAGE
-         * ----------------------------------------------------------------------
-         */
         $imagePath = null;
 
         if ($request->hasFile('image')) {
+            $file = $request->file('image');
 
-            $file =
-                $request->file('image');
-
-            $filename =
-                time() .
-                '_' .
-                Str::random(10) .
-                '.' .
+            $filename = time() . '_' . Str::random(10) . '.' .
                 $file->getClientOriginalExtension();
 
-            $imagePath =
-                $file->storeAs(
-                    'students',
-                    $filename,
-                    'public'
-                );
+            $imagePath = $file->storeAs(
+                'students',
+                $filename,
+                'public'
+            );
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * GENERATE STUDENT ID
-         * ----------------------------------------------------------------------
-         */
-        $lastStudent =
-            Student::latest('id')->first();
+        $student = null;
 
-        if (
-            $lastStudent &&
-            $lastStudent->student_id
-        ) {
-
-            $lastNumber =
-                (int) str_replace(
-                    'STD-',
-                    '',
-                    $lastStudent->student_id
-                );
-
-            $studentId =
-                'STD-' .
-                ($lastNumber + 1);
-
-        } else {
-
-            $studentId =
-                'STD-1001';
-        }
-
-        /**
-         * ----------------------------------------------------------------------
-         * CREATE STUDENT
-         * ----------------------------------------------------------------------
-         */
-        $student = Student::create([
-
-            'full_name' =>
-                $request->full_name,
-
-            'version' =>
-                $request->version,
-
-            'fathers_name' =>
-                $request->fathers_name,
-
-            'mothers_name' =>
-                $request->mothers_name,
-
-            'student_id' =>
-                $studentId,
-
-            'phone' =>
-                $request->phone,
-
-            'section_id' =>
-                $request->section_id,
-
-            'class_id' =>
-                $request->class_id,
-
-            'class_group_id' =>
-                $request->class_group_id,
-
-            'shift_id' =>
-                $request->shift_id,
-
-            'course_name' =>
-                $request->course_name,
-
-            'admission_date' =>
-                $request->admission_date
-                ?? now()->toDateString(),
-
-            'email' =>
-                $request->email,
-
-            'image' =>
-                $imagePath,
-
-            'monthly_fee' =>
-                $request->monthly_fee,
-
-            'branch_id' =>
+        try {
+            DB::transaction(function () use (
+                $request,
                 $branchId,
-        ]);
+                $academicSession,
+                $imagePath,
+                &$student
+            ) {
+                $lastStudent = Student::latest('id')->first();
+
+                if ($lastStudent && $lastStudent->student_id) {
+                    $lastNumber = (int) str_replace(
+                        'STD-',
+                        '',
+                        $lastStudent->student_id
+                    );
+
+                    $studentId = 'STD-' . ($lastNumber + 1);
+                } else {
+                    $studentId = 'STD-1001';
+                }
+
+                $monthlyFee = $request->monthly_fee ?? 0;
+
+                $student = Student::create([
+                    'full_name' => $request->full_name,
+                    'version' => $request->version,
+                    'fathers_name' => $request->fathers_name,
+                    'mothers_name' => $request->mothers_name,
+                    'student_id' => $studentId,
+                    'phone' => $request->phone,
+                    'section_id' => $request->section_id,
+                    'class_id' => $request->class_id,
+                    'class_group_id' => $request->class_group_id,
+                    'shift_id' => $request->shift_id,
+                    'course_name' => $request->course_name,
+                    'admission_date' => $request->admission_date
+                        ?? now()->toDateString(),
+                    'email' => $request->email,
+                    'image' => $imagePath,
+                    'monthly_fee' => $monthlyFee,
+                    'branch_id' => $branchId,
+                ]);
+
+                StudentSession::create([
+                    'student_id' => $student->id,
+                    'academic_session_id' => $academicSession->id,
+                    'branch_id' => $branchId,
+                    'class_id' => $request->class_id,
+                    'section_id' => $request->section_id,
+                    'shift_id' => $request->shift_id,
+                    'class_group_id' => $request->class_group_id,
+                    'monthly_fee' => $monthlyFee,
+                    'status' => 'active',
+                ]);
+            });
+        } catch (\Throwable $e) {
+            if (
+                $imagePath &&
+                Storage::disk('public')->exists($imagePath)
+            ) {
+                Storage::disk('public')->delete($imagePath);
+            }
+
+            throw $e;
+        }
 
         return response()->json([
             'status' => true,
-
-            'message' =>
-                'Student Created Successfully',
-
-            'student' =>
-                $student->load([
-                    'section',
-                    'classInfo',
-                    'classGroup',
-                    'shift',
-                    'branch'
-                ])
+            'message' => 'Student Created Successfully',
+            'student' => $student->load([
+                'section',
+                'classInfo',
+                'classGroup',
+                'shift',
+                'branch',
+            ]),
         ], 201);
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * Display the specified student.
-     * --------------------------------------------------------------------------
+     * Display one student with all session enrollment details.
      */
-    public function show(
-        Request $request,
-        Student $student
-    ) {
-        $authUser =
-            $request->user();
+    public function show(Request $request, Student $student)
+    {
+        $authUser = $request->user();
 
-        /**
-         * Authentication check.
-         */
         if (!$authUser) {
             return $this->unauthenticated();
         }
 
-        /**
-         * Current branch context access check.
-         */
-        if (
-            !$this->canAccessStudent(
-                $authUser,
-                $student
-            )
-        ) {
-            return $this->forbidden(
-                'You cannot access this student.'
-            );
+        if (!$this->canAccessStudent($authUser, $student)) {
+            return $this->forbidden('You cannot access this student.');
         }
+
+        $student->load([
+            'payments',
+            'section',
+            'classInfo',
+            'classGroup',
+            'shift',
+            'branch',
+        ]);
+
+        $student->setAttribute(
+            'student_sessions',
+            StudentSession::with([
+                'academicSession',
+                'classInfo',
+                'section',
+                'shift',
+                'classGroup',
+                'payments',
+            ])
+                ->where('student_id', $student->id)
+                ->orderBy('academic_session_id', 'desc')
+                ->get()
+        );
 
         return response()->json([
             'status' => true,
-
-            'student' =>
-                $student->load([
-                    'payments',
-                    'section',
-                    'classInfo',
-                    'classGroup',
-                    'shift',
-                    'branch'
-                ])
+            'student' => $student,
         ]);
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * Show the form data for editing.
-     * --------------------------------------------------------------------------
+     * Edit data.
      */
-    public function edit(
-        Request $request,
-        Student $student
-    ) {
-        $authUser =
-            $request->user();
-
-        /**
-         * Authentication check.
-         */
-        if (!$authUser) {
-            return $this->unauthenticated();
-        }
-
-        /**
-         * Current branch context access check.
-         */
-        if (
-            !$this->canAccessStudent(
-                $authUser,
-                $student
-            )
-        ) {
-            return $this->forbidden(
-                'You cannot edit this student.'
-            );
-        }
-
-        return response()->json([
-            'status' => true,
-
-            'student' =>
-                $student->load([
-                    'payments',
-                    'section',
-                    'classInfo',
-                    'classGroup',
-                    'shift',
-                    'branch'
-                ])
-        ]);
+    public function edit(Request $request, Student $student)
+    {
+        return $this->show($request, $student);
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * Update the specified student.
-     * --------------------------------------------------------------------------
+     * Update student personal data and selected session enrollment.
+     *
+     * Editing an older session must not overwrite the student's
+     * latest class, section, shift, group, or monthly fee.
      */
-    public function update(
-        Request $request,
-        Student $student
-    ) {
-        $authUser =
-            $request->user();
+    public function update(Request $request, Student $student)
+    {
+        $authUser = $request->user();
 
-        /**
-         * Authentication check.
-         */
         if (!$authUser) {
             return $this->unauthenticated();
         }
 
-        /**
-         * Current branch context access check.
-         */
-        if (
-            !$this->canAccessStudent(
-                $authUser,
-                $student
-            )
-        ) {
-            return $this->forbidden(
-                'You cannot update this student.'
-            );
+        if (!$this->canAccessStudent($authUser, $student)) {
+            return $this->forbidden('You cannot update this student.');
         }
 
         $request->validate([
-            'full_name' =>
-                'required|string|max:255',
-
-            'version' =>
-                'required|string|max:50',
-
-            'phone' =>
-                'required|string|max:20',
-
-            'section_id' =>
-                'required|exists:sections,id',
-
-            'class_id' =>
-                'required|exists:clss_m_s,id',
-
-            'class_group_id' =>
-                'required|exists:class_groups,id',
-
-            'shift_id' =>
-                'required|exists:shifts,id',
-
-            'course_name' =>
-                'nullable|string|max:100',
-
-            'admission_date' =>
-                'required|date',
-
+            'full_name' => 'required|string|max:255',
+            'version' => 'required|string|max:50',
+            'phone' => 'required|string|max:20',
+            'academic_session_id' => 'required|integer|exists:academic_sessions,id',
+            'section_id' => 'required|integer|exists:sections,id',
+            'class_id' => 'required|integer|exists:clss_m_s,id',
+            'class_group_id' => 'required|integer|exists:class_groups,id',
+            'shift_id' => 'required|integer|exists:shifts,id',
+            'course_name' => 'nullable|string|max:100',
+            'admission_date' => 'required|date',
             'email' => [
                 'required',
                 'email',
-                Rule::unique(
-                    'students',
-                    'email'
-                )->ignore($student->id)
+                Rule::unique('students', 'email')->ignore($student->id),
             ],
-
-            'image' =>
-                'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
-
-            'monthly_fee' =>
-                'nullable|numeric',
+            'image' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'monthly_fee' => 'nullable|numeric|min:0',
         ]);
 
-        /**
-         * ----------------------------------------------------------------------
-         * IMPORTANT
-         * ----------------------------------------------------------------------
-         *
-         * Student branch can NEVER be changed here.
-         *
-         * It is taken from the existing database record.
-         */
-        $branchId =
-            $student->branch_id;
+        $branchId = $student->branch_id;
 
-        /**
-         * Student must already have a valid branch.
-         */
         if (!$branchId) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Student is not assigned to any branch.'
+                'message' => 'Student is not assigned to any branch.',
             ], 422);
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * VERIFY SECTION BRANCH
-         * ----------------------------------------------------------------------
-         */
-        $section =
-            \App\Models\Section::find(
-                $request->section_id
-            );
+        $academicSession = $this->getAcademicSessionForBranch(
+            $request->academic_session_id,
+            $branchId
+        );
 
-        if (
-            !$section ||
-            (int) $section->branch_id !== (int) $branchId
-        ) {
+        if (!$academicSession) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Selected section does not belong to this student branch.'
+                'message' => 'Selected academic session does not belong to this student branch.',
             ], 422);
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * VERIFY CLASS BRANCH
-         * ----------------------------------------------------------------------
-         */
-        $class =
-            \App\Models\ClssM::find(
-                $request->class_id
-            );
+        $academicError = $this->validateAcademicDetails(
+            $request,
+            $branchId
+        );
 
-        if (
-            !$class ||
-            (int) $class->branch_id !== (int) $branchId
-        ) {
-            return response()->json([
-                'status' => false,
-                'message' =>
-                    'Selected class does not belong to this student branch.'
-            ], 422);
+        if ($academicError) {
+            return $academicError;
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * VERIFY CLASS GROUP BRANCH
-         * ----------------------------------------------------------------------
-         */
-        $classGroup =
-            \App\Models\ClassGroup::find(
-                $request->class_group_id
-            );
-
-        if (
-            !$classGroup ||
-            (int) $classGroup->branch_id !== (int) $branchId
-        ) {
-            return response()->json([
-                'status' => false,
-                'message' =>
-                    'Selected class group does not belong to this student branch.'
-            ], 422);
-        }
-
-        /**
-         * ----------------------------------------------------------------------
-         * VERIFY SHIFT BRANCH
-         * ----------------------------------------------------------------------
-         */
-        $shift =
-            \App\Models\Shift::find(
-                $request->shift_id
-            );
-
-        if (
-            !$shift ||
-            (int) $shift->branch_id !== (int) $branchId
-        ) {
-            return response()->json([
-                'status' => false,
-                'message' =>
-                    'Selected shift does not belong to this student branch.'
-            ], 422);
-        }
-
-        /**
-         * ----------------------------------------------------------------------
-         * IMAGE
-         * ----------------------------------------------------------------------
-         */
-        $imagePath =
-            $student->image;
+        $oldImagePath = $student->image;
+        $imagePath = $oldImagePath;
 
         if ($request->hasFile('image')) {
+            $file = $request->file('image');
 
-            if (
-                $student->image &&
-                Storage::disk('public')->exists(
-                    $student->image
-                )
-            ) {
-                Storage::disk('public')->delete(
-                    $student->image
-                );
-            }
-
-            $file =
-                $request->file('image');
-
-            $filename =
-                time() .
-                '_' .
-                Str::random(10) .
-                '.' .
+            $filename = time() . '_' . Str::random(10) . '.' .
                 $file->getClientOriginalExtension();
 
-            $imagePath =
-                $file->storeAs(
-                    'students',
-                    $filename,
-                    'public'
-                );
+            $imagePath = $file->storeAs(
+                'students',
+                $filename,
+                'public'
+            );
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * UPDATE
-         * ----------------------------------------------------------------------
-         *
-         * branch_id intentionally NOT included.
-         *
-         * This prevents branch manipulation.
+        try {
+            DB::transaction(function () use (
+                $request,
+                $student,
+                $branchId,
+                $academicSession,
+                $imagePath
+            ) {
+                $enrollment = StudentSession::where(
+                    'student_id',
+                    $student->id
+                )
+                    ->where(
+                        'academic_session_id',
+                        $academicSession->id
+                    )
+                    ->lockForUpdate()
+                    ->first();
+
+                /*
+                 * Preserve the current project's latest-session rule.
+                 */
+                $latestSessionId = StudentSession::where(
+                    'student_id',
+                    $student->id
+                )->max('academic_session_id');
+
+                $isLatestSession = $latestSessionId === null
+                    || (int) $academicSession->id >= (int) $latestSessionId;
+
+                $monthlyFee = $request->monthly_fee
+                    ?? (
+                        $enrollment?->monthly_fee
+                        ?? $student->monthly_fee
+                        ?? 0
+                    );
+
+                /*
+                 * Update personal information for every session edit.
+                 */
+                $studentData = [
+                    'full_name' => $request->full_name,
+                    'version' => $request->version,
+                    'phone' => $request->phone,
+                    'course_name' => $request->course_name,
+                    'admission_date' => $request->admission_date,
+                    'email' => $request->email,
+                    'image' => $imagePath,
+                ];
+
+                /*
+                 * Only the latest enrollment updates legacy current-class fields.
+                 */
+                if ($isLatestSession) {
+                    $studentData['section_id'] = $request->section_id;
+                    $studentData['class_id'] = $request->class_id;
+                    $studentData['class_group_id'] = $request->class_group_id;
+                    $studentData['shift_id'] = $request->shift_id;
+                    $studentData['monthly_fee'] = $monthlyFee;
+                }
+
+                $student->update($studentData);
+
+                /*
+                 * Update the selected session only, or create its enrollment.
+                 */
+                $enrollmentData = [
+                    'student_id' => $student->id,
+                    'academic_session_id' => $academicSession->id,
+                    'branch_id' => $branchId,
+                    'class_id' => $request->class_id,
+                    'section_id' => $request->section_id,
+                    'shift_id' => $request->shift_id,
+                    'class_group_id' => $request->class_group_id,
+                    'monthly_fee' => $monthlyFee,
+                ];
+
+                if ($enrollment) {
+                    $enrollment->update($enrollmentData);
+                } else {
+                    $enrollmentData['status'] = 'active';
+
+                    StudentSession::create($enrollmentData);
+                }
+            });
+        } catch (\Throwable $e) {
+            if (
+                $request->hasFile('image') &&
+                $imagePath &&
+                $imagePath !== $oldImagePath &&
+                Storage::disk('public')->exists($imagePath)
+            ) {
+                Storage::disk('public')->delete($imagePath);
+            }
+
+            throw $e;
+        }
+
+        /*
+         * Delete the previous image only after successful database update.
          */
-        $student->update([
+        if (
+            $request->hasFile('image') &&
+            $oldImagePath &&
+            $oldImagePath !== $imagePath &&
+            Storage::disk('public')->exists($oldImagePath)
+        ) {
+            Storage::disk('public')->delete($oldImagePath);
+        }
 
-            'full_name' =>
-                $request->full_name,
-
-            'version' =>
-                $request->version,
-
-            'phone' =>
-                $request->phone,
-
-            'section_id' =>
-                $request->section_id,
-
-            'class_id' =>
-                $request->class_id,
-
-            'class_group_id' =>
-                $request->class_group_id,
-
-            'shift_id' =>
-                $request->shift_id,
-
-            'course_name' =>
-                $request->course_name,
-
-            'admission_date' =>
-                $request->admission_date,
-
-            'email' =>
-                $request->email,
-
-            'image' =>
-                $imagePath,
-
-            'monthly_fee' =>
-                $request->monthly_fee
-                ?? $student->monthly_fee,
-        ]);
+        $student->refresh();
 
         return response()->json([
             'status' => true,
-
-            'message' =>
-                'Student Updated Successfully',
-
-            'student' =>
-                $student->load([
-                    'section',
-                    'classInfo',
-                    'classGroup',
-                    'shift',
-                    'branch'
-                ])
+            'message' => 'Student Updated Successfully',
+            'student' => $student->load([
+                'section',
+                'classInfo',
+                'classGroup',
+                'shift',
+                'branch',
+            ]),
         ]);
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * Remove the specified student.
-     * --------------------------------------------------------------------------
+     * Delete student, payments, and session enrollments.
      */
-    public function destroy(
-        Request $request,
-        Student $student
-    ) {
-        $authUser =
-            $request->user();
+    public function destroy(Request $request, Student $student)
+    {
+        $authUser = $request->user();
 
-        /**
-         * Authentication check.
-         */
         if (!$authUser) {
             return $this->unauthenticated();
         }
 
-        /**
-         * Current branch context access check.
-         */
-        if (
-            !$this->canAccessStudent(
-                $authUser,
-                $student
-            )
-        ) {
-            return $this->forbidden(
-                'You cannot delete this student.'
-            );
+        if (!$this->canAccessStudent($authUser, $student)) {
+            return $this->forbidden('You cannot delete this student.');
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * DELETE IMAGE
-         * ----------------------------------------------------------------------
-         */
+        DB::transaction(function () use ($student) {
+            $student->payments()->delete();
+
+            StudentSession::where(
+                'student_id',
+                $student->id
+            )->delete();
+
+            $student->delete();
+        });
+
         if (
             $student->image &&
-            Storage::disk('public')->exists(
-                $student->image
-            )
+            Storage::disk('public')->exists($student->image)
         ) {
-            Storage::disk('public')->delete(
-                $student->image
-            );
+            Storage::disk('public')->delete($student->image);
         }
-
-        /**
-         * ----------------------------------------------------------------------
-         * DELETE RELATED PAYMENTS
-         * ----------------------------------------------------------------------
-         */
-        $student->payments()->delete();
-
-        /**
-         * ----------------------------------------------------------------------
-         * DELETE STUDENT
-         * ----------------------------------------------------------------------
-         */
-        $student->delete();
 
         return response()->json([
             'status' => true,
-            'message' =>
-                'Student and related payments deleted successfully'
+            'message' => 'Student, related payments, and session enrollments deleted successfully.',
         ]);
     }
 
     /**
-     * --------------------------------------------------------------------------
      * Get payments of a student.
-     * --------------------------------------------------------------------------
      */
-    public function studentPayments(
-        Request $request,
-        $id
-    ) {
-        $authUser =
-            $request->user();
+    public function studentPayments(Request $request, $id)
+    {
+        $authUser = $request->user();
 
-        /**
-         * Authentication check.
-         */
         if (!$authUser) {
             return $this->unauthenticated();
         }
 
-        /**
-         * Role authorization before querying student.
-         */
         if (!$this->canAccessModule($authUser)) {
             return $this->forbidden(
                 'You are not authorized to access student payments.'
             );
         }
 
-        /**
-         * Find student.
-         */
-        $student =
-            Student::findOrFail($id);
+        $student = Student::findOrFail($id);
 
-        /**
-         * ----------------------------------------------------------------------
-         * CURRENT BRANCH ACCESS CHECK
-         * ----------------------------------------------------------------------
-         */
-        if (
-            !$this->canAccessStudent(
-                $authUser,
-                $student
-            )
-        ) {
+        if (!$this->canAccessStudent($authUser, $student)) {
             return $this->forbidden(
                 'You cannot access payments of a student from another branch.'
             );
         }
 
-        /**
-         * ----------------------------------------------------------------------
-         * GET PAYMENTS
-         * ----------------------------------------------------------------------
-         *
-         * Payments are retrieved through the already authorized student.
-         */
-        $payments =
-            Payment::with('student')
-                ->where(
-                    'student_id',
-                    $student->id
-                )
-                ->latest()
-                ->get();
+        $payments = Payment::with('student')
+            ->where('student_id', $student->id)
+            ->latest()
+            ->get();
 
         return response()->json([
-            'status' =>
-                true,
-
-            'payments' =>
-                $payments
+            'status' => true,
+            'payments' => $payments,
         ]);
     }
 
     /**
-     * --------------------------------------------------------------------------
-     * Student image.
-     * --------------------------------------------------------------------------
-     *
-     * NOTE:
-     * This endpoint may intentionally remain public because student image
-     * URLs are used directly by the frontend.
-     *
-     * If this route is protected with auth:sanctum later, frontend image
-     * loading must also be changed accordingly.
-     * --------------------------------------------------------------------------
+     * Student image endpoint.
      */
     public function image($filename)
     {
-        $path =
-            storage_path(
-                'app/public/students/' .
-                $filename
-            );
+        $path = storage_path(
+            'app/public/students/' . basename($filename)
+        );
 
         if (!file_exists($path)) {
             abort(404);
         }
 
         return response()->file($path, [
-            'Access-Control-Allow-Origin' =>
-                'http://localhost:5173',
-
-            'Access-Control-Allow-Methods' =>
-                'GET, OPTIONS',
-
-            'Access-Control-Allow-Headers' =>
-                'Content-Type',
+            'Access-Control-Allow-Origin' => 'http://localhost:5173',
+            'Access-Control-Allow-Methods' => 'GET, OPTIONS',
+            'Access-Control-Allow-Headers' => 'Content-Type',
         ]);
     }
 }
