@@ -34,5 +34,9 @@ return [
             'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         ],
     ],
+    'sms' => [
+    'api_key' => env('SMS_GATEWAY_API_KEY'),
+    'base_url' => env('SMS_GATEWAY_URL', 'https://api.sms.net.bd'),
+    ],
 
 ];

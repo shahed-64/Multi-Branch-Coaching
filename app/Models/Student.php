@@ -24,6 +24,8 @@ class Student extends Model
         'status',
         'class_group_id',
         'branch_id',
+        'student_roll',
+        'second_phone',
     ];
 
     protected $appends = [

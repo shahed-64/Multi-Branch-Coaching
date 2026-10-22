@@ -19,6 +19,8 @@ class Payment extends Model
         'admission_fee',
         'exam_fee',
         'status',
+        'due_month',
+        'due_payment_amount',
     ];
 
     protected $casts = [
@@ -27,6 +29,7 @@ class Payment extends Model
         'due_amount' => 'decimal:2',
         'admission_fee' => 'decimal:2',
         'exam_fee' => 'decimal:2',
+        'due_payment_amount' => 'decimal:2',
         'payment_date' => 'date:Y-m-d',
     ];
 

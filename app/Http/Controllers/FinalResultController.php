@@ -7,6 +7,7 @@ use App\Models\Result;
 use App\Models\Examination;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use App\Models\StudentSession;
 
 class FinalResultController extends Controller
 {
@@ -913,4 +914,309 @@ class FinalResultController extends Controller
             'overall_gpa' => round($overallGpa, 2),
         ]);
     }
+
+/**
+ * Average Result Merit List based on Total Weighted Score.
+ */
+public function averageMeritList(Request $request): JsonResponse
+{
+    if ($response = $this->authorizeAccess($request)) {
+        return $response;
+    }
+
+    $user = $request->user();
+
+    $validated = $request->validate([
+        'academic_session_id' => [
+            'required',
+            'integer',
+            'exists:academic_sessions,id',
+        ],
+        'class_id' => [
+            'required',
+            'integer',
+            'exists:clss_m_s,id',
+        ],
+        'section_id' => [
+            'required',
+            'integer',
+            'exists:sections,id',
+        ],
+        'shift_id' => [
+            'required',
+            'integer',
+            'exists:shifts,id',
+        ],
+        'class_group_id' => [
+            'nullable',
+            'integer',
+            'exists:class_groups,id',
+        ],
+    ]);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Selected Academic Session
+    |--------------------------------------------------------------------------
+    */
+
+    $academicSession = \App\Models\AcademicSession::query()
+        ->whereKey($validated['academic_session_id'])
+        ->when(
+            $user->role !== 'Manager',
+            fn ($query) => $query->where('branch_id', $user->branch_id)
+        )
+        ->first();
+
+    if (!$academicSession) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Academic session not found for this branch.',
+        ], 422);
+    }
+
+    $year = (string) $academicSession->name;
+
+    /*
+    |--------------------------------------------------------------------------
+    | Final Result Configuration
+    |--------------------------------------------------------------------------
+    */
+
+    $configurations = \App\Models\FinalResult::with('examination')
+        ->whereHas('examination', function ($query) use ($year, $user) {
+            $query->where('examination_year', $year);
+
+            if ($user->role !== 'Manager') {
+                $query->where('branch_id', $user->branch_id);
+            }
+        })
+        ->get()
+        ->filter(fn ($item) => $item->examination !== null)
+        ->values();
+
+    if ($configurations->isEmpty()) {
+        return response()->json([
+            'status' => false,
+            'message' => 'No Final Average Result configuration found for this academic session.',
+        ], 422);
+    }
+
+    $totalPercentage = round(
+        (float) $configurations->sum('percentage'),
+        2
+    );
+
+    if ($totalPercentage !== 100.0) {
+        return response()->json([
+            'status' => false,
+            'message' => "Final Result examination percentages must total 100%. Current total: {$totalPercentage}%.",
+        ], 422);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Students from Their Historical Student Session
+    |--------------------------------------------------------------------------
+    */
+
+    $studentSessions = StudentSession::with([
+        'student',
+        'academicSession',
+        'classInfo',
+        'section',
+        'shift',
+        'classGroup',
+    ])
+        ->where('academic_session_id', $validated['academic_session_id'])
+        ->where('class_id', $validated['class_id'])
+        ->where('section_id', $validated['section_id'])
+        ->where('shift_id', $validated['shift_id'])
+        ->when(
+            !empty($validated['class_group_id']),
+            fn ($query) => $query->where(
+                'class_group_id',
+                $validated['class_group_id']
+            ),
+            fn ($query) => $query->whereNull('class_group_id')
+        )
+        ->when(
+            $user->role !== 'Manager',
+            fn ($query) => $query->where('branch_id', $user->branch_id)
+        )
+        ->get();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Calculate Each Student's Total Weighted Score and GPA
+    |--------------------------------------------------------------------------
+    */
+
+    $rows = $studentSessions->map(function ($studentSession) use (
+        $configurations,
+        $year
+    ) {
+        $student = $studentSession->student;
+
+        if (
+            !$student ||
+            (int) $student->id !== (int) $studentSession->student_id ||
+            (int) $student->branch_id !== (int) $studentSession->branch_id
+        ) {
+            return null;
+        }
+
+        $results = \App\Models\Result::with('resultSubjects.subject')
+            ->where('student_id', $student->id)
+            ->where('student_session_id', $studentSession->id)
+            ->where('exam_year', $year)
+            ->where('branch_id', $studentSession->branch_id)
+            ->get()
+            ->keyBy('exam_type');
+
+        $subjectScores = [];
+
+        foreach ($configurations as $configuration) {
+            $examination = $configuration->examination;
+
+            if (!$examination) {
+                continue;
+            }
+
+            $result = $results->get($examination->examination_type);
+
+            if (!$result) {
+                continue;
+            }
+
+            foreach ($result->resultSubjects as $resultSubject) {
+                $subject = $resultSubject->subject;
+
+                if (
+                    !$subject ||
+                    (int) $subject->branch_id !== (int) $studentSession->branch_id
+                ) {
+                    continue;
+                }
+
+                $fullMark = $examination->exam_mark !== null
+                    ? (float) $examination->exam_mark
+                    : (float) ($subject->full_mark ?? 100);
+
+                if ($fullMark <= 0) {
+                    continue;
+                }
+
+                $marks = (float) ($resultSubject->marks ?? 0);
+
+                $weightedPercentage = (
+                    ($marks / $fullMark) * 100
+                ) * ((float) $configuration->percentage / 100);
+
+                if (!isset($subjectScores[$subject->id])) {
+                    $subjectScores[$subject->id] = [
+                        'subject_id' => $subject->id,
+                        'subject_name' => $subject->subject_name
+                            ?? $subject->name
+                            ?? 'Unknown Subject',
+                        'weighted_score' => 0,
+                    ];
+                }
+
+                $subjectScores[$subject->id]['weighted_score'] +=
+                    $weightedPercentage;
+            }
+        }
+
+        if (empty($subjectScores)) {
+            return null;
+        }
+
+        $totalWeightedScore = 0;
+        $totalGradePoints = 0;
+        $subjectCount = 0;
+        $hasFailedSubject = false;
+
+        foreach ($subjectScores as $subjectScore) {
+            $score = round((float) $subjectScore['weighted_score'], 2);
+
+            $totalWeightedScore += $score;
+
+            $grading = \App\Models\GradingSystem::where(
+                'min_percentage',
+                '<=',
+                $score
+            )
+                ->orderByDesc('min_percentage')
+                ->first();
+
+            $gradePoint = $grading
+                ? (float) $grading->grade_point
+                : 0;
+
+            $totalGradePoints += $gradePoint;
+            $subjectCount++;
+
+            if (!$grading || $gradePoint <= 0) {
+                $hasFailedSubject = true;
+            }
+        }
+
+        $gpa = $subjectCount > 0
+            ? min(5, round($totalGradePoints / $subjectCount, 2))
+            : 0;
+
+        return [
+            'student_session_id' => $studentSession->id,
+            'student_id' => $student->student_id,
+            'student_name' => $student->full_name,
+            'total_marks' => round($subjectCount * 100, 2),
+            'obtained_marks' => round($totalWeightedScore, 2),
+            'total_weighted_score' => round($totalWeightedScore, 2),
+            'gpa' => $hasFailedSubject ? 0 : $gpa,
+            'status' => $hasFailedSubject ? 'Fail' : 'Pass',
+            'merit_rank' => null,
+            '_rank_score' => round($totalWeightedScore, 2),
+        ];
+    })->filter()->values();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Merit Rank: Equal Scores Share Rank (1, 2, 2, 4)
+    |--------------------------------------------------------------------------
+    */
+
+    $previousScore = null;
+    $rank = 0;
+
+    $rankedRows = $rows
+        ->sortByDesc('_rank_score')
+        ->values()
+        ->map(function ($row, $index) use (&$previousScore, &$rank) {
+            $currentScore = (float) $row['_rank_score'];
+
+            if (
+                $previousScore === null ||
+                $currentScore !== $previousScore
+            ) {
+                $rank = $index + 1;
+            }
+
+            $row['merit_rank'] = $rank;
+
+            unset($row['_rank_score']);
+
+            $previousScore = $currentScore;
+
+            return $row;
+        });
+
+    return response()->json([
+        'status' => true,
+        'academic_session' => $academicSession,
+        'filters' => $validated,
+        'total_students' => $rankedRows->count(),
+        'results' => $rankedRows,
+    ]);
+}
 }

@@ -480,4 +480,147 @@ class StudentSessionController extends Controller
             'migrated_count' => $migratedCount,
         ]);
     }
+    public function migrateSingle(Request $request): JsonResponse
+{
+    $denied = $this->authorizeMigration($request);
+
+    if ($denied) {
+        return $denied;
+    }
+
+    $data = $request->validate([
+        'student_session_id' => ['required', 'integer', 'exists:student_sessions,id'],
+        'from_session_id'    => ['required', 'integer', 'exists:academic_sessions,id'],
+        'to_session_id'      => ['required', 'integer', 'exists:academic_sessions,id'],
+
+        'to_class_id'        => ['required', 'integer'],
+        'to_section_id'      => ['required', 'integer'],
+        'to_shift_id'        => ['present', 'nullable', 'integer'],
+        'to_group_id'        => ['present', 'nullable', 'integer'],
+        'to_monthly_fee'     => ['required', 'numeric', 'min:0'],
+    ]);
+
+    $sourceSession = $this->accessibleSession(
+        $request,
+        (int) $data['from_session_id']
+    );
+
+    if (!$sourceSession) {
+        return response()->json([
+            'message' => 'Source academic session not found or access denied.',
+        ], 403);
+    }
+
+    $targetSession = $this->accessibleSession(
+        $request,
+        (int) $data['to_session_id']
+    );
+
+    if (!$targetSession) {
+        return response()->json([
+            'message' => 'Destination academic session not found or access denied.',
+        ], 403);
+    }
+
+    // A student cannot be migrated across branches.
+    if (
+        $sourceSession->branch_id &&
+        $targetSession->branch_id &&
+        (int) $sourceSession->branch_id !== (int) $targetSession->branch_id
+    ) {
+        return response()->json([
+            'message' => 'Source and destination sessions must belong to the same branch.',
+        ], 422);
+    }
+
+    $branchId = $sourceSession->branch_id
+        ? (int) $sourceSession->branch_id
+        : $this->currentBranchId();
+
+    if (!$branchId) {
+        return response()->json([
+            'message' => 'Unable to determine the branch for migration.',
+        ], 422);
+    }
+
+    $placementError = $this->validatePlacement(
+        $data,
+        'to',
+        $branchId
+    );
+
+    if ($placementError) {
+        return $placementError;
+    }
+
+    return DB::transaction(function () use ($data, $branchId) {
+
+        // Find the selected student's existing source-session record.
+        $sourceEnrollment = StudentSession::where(
+            'id',
+            $data['student_session_id']
+        )
+            ->where('academic_session_id', $data['from_session_id'])
+            ->where('branch_id', $branchId)
+            ->lockForUpdate()
+            ->first();
+
+        if (!$sourceEnrollment) {
+            return response()->json([
+                'message' => 'Student enrollment not found in the selected source session.',
+            ], 404);
+        }
+
+        // Same session: update the existing row.
+        if ((int) $data['from_session_id'] === (int) $data['to_session_id']) {
+            $targetEnrollment = $sourceEnrollment;
+        } else {
+            // Different session: update its existing row, if present.
+            $targetEnrollment = StudentSession::where(
+                'student_id',
+                $sourceEnrollment->student_id
+            )
+                ->where('academic_session_id', $data['to_session_id'])
+                ->where('branch_id', $branchId)
+                ->lockForUpdate()
+                ->first();
+        }
+
+        $placement = [
+            'class_id'       => $data['to_class_id'],
+            'section_id'     => $data['to_section_id'],
+            'shift_id'       => $data['to_shift_id'],
+            'class_group_id' => $data['to_group_id'],
+            'monthly_fee'    => $data['to_monthly_fee'],
+        ];
+
+        if ($targetEnrollment) {
+            // Update only the destination student_sessions row.
+            $targetEnrollment->update($placement);
+        } else {
+            // No enrollment exists in the destination session: create one.
+            $targetEnrollment = StudentSession::create(array_merge(
+                $placement,
+                [
+                    'student_id'         => $sourceEnrollment->student_id,
+                    'academic_session_id' => $data['to_session_id'],
+                    'branch_id'          => $branchId,
+                    'status'              => 'active',
+                ]
+            ));
+        }
+
+        return response()->json([
+            'message' => 'Student migration completed successfully.',
+            'student_session' => $targetEnrollment->load([
+                'student',
+                'academicSession',
+                'classInfo',
+                'section',
+                'shift',
+                'classGroup',
+            ]),
+        ]);
+    });
+}
 }

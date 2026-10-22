@@ -734,301 +734,164 @@ class StaffAttendanceController extends Controller
      * STAFF SUMMARY REPORT
      * ============================================================
      */
-    public function staffSummaryReport(
-        Request $request
-    ) {
-        $year =
-            $request->input(
-                'year',
-                date('Y')
-            );
+
+    public function staffSummaryReport(Request $request)
+    {
+        $year = $request->input('year', date('Y'));
 
         try {
+            $staffs = $this->staffQuery()->get();
 
-            /**
-             * Staff list follows BranchContext.
-             */
-            $staffs =
-                $this
-                    ->staffQuery()
-                    ->get();
+            // Attendance নেওয়া হয়েছে এমন তারিখগুলো।
+            // যে তারিখে কোনো attendance record নেই, সেটি গণনা হবে না।
+            $attendanceDates = $this->attendanceQuery()
+                ->whereYear('date', $year)
+                ->select('date')
+                ->distinct()
+                ->pluck('date')
+                ->map(fn ($date) => Carbon::parse($date)->toDateString())
+                ->filter(function ($date) {
+                    return !Holiday::where('start_date', '<=', $date)
+                        ->where('end_date', '>=', $date)
+                        ->exists();
+                })
+                ->values();
 
-            $summary = $staffs->map(
-                function ($staff) use ($year) {
+            $summary = $staffs->map(function ($staff) use ($year, $attendanceDates) {
+                $attendances = $this->attendanceQuery()
+                    ->where('staff_id', $staff->id)
+                    ->whereYear('date', $year)
+                    ->get()
+                    ->filter(function ($attendance) {
+                        return !Holiday::where('start_date', '<=', $attendance->date)
+                            ->where('end_date', '>=', $attendance->date)
+                            ->exists();
+                    });
 
-                    /**
-                     * Attendance also follows
-                     * current BranchContext.
-                     */
-                    $attendances =
-                        $this
-                            ->attendanceQuery()
-                            ->where(
-                                'staff_id',
-                                $staff->id
-                            )
-                            ->whereYear(
-                                'date',
-                                $year
-                            )
-                            ->get();
+                $staffDates = $attendances
+                    ->map(fn ($attendance) => Carbon::parse($attendance->date)->toDateString())
+                    ->unique();
 
-                    /**
-                     * Holiday date বাদ দেওয়া
-                     */
-                    $attendances =
-                        $attendances->filter(
-                            function ($attendance) {
+                // Missing record-ও absent হিসেবে গণনা হবে।
+                $missingDays = $attendanceDates->diff($staffDates)->count();
 
-                                return !Holiday::where(
-                                    'start_date',
-                                    '<=',
-                                    $attendance->date
-                                )
-                                    ->where(
-                                        'end_date',
-                                        '>=',
-                                        $attendance->date
-                                    )
-                                    ->exists();
-                            }
-                        );
+                $present = $attendances->where('status', 'Present')->count();
+                $late = $attendances->where('status', 'Late')->count();
+                $absent = $attendances->where('status', 'Absent')->count();
+                $leave = $attendances->where('status', 'Leave')->count();
+                $offDay = $attendances->where('status', 'Off Day')->count();
 
-                    return [
-                        'id' =>
-                            $staff->id,
+                return [
+                    'id' => $staff->id,
+                    'name' => $staff->name ?? 'N/A',
+                    'code' => $staff->user_name
+                        ?? $staff->staff_code
+                        ?? 'STF-' . $staff->id,
+                    'skill' => $staff->skill ?? $staff->role ?? 'N/A',
+                    'total_present' => $present,
+                    'total_late' => $late,
+                    'total_absent' => $absent + $missingDays,
+                    'total_leave' => $leave,
+                    'total_off_day' => $offDay,
+                ];
+            });
 
-                        'name' =>
-                            $staff->name
-                            ?? 'N/A',
-
-                        'code' =>
-                            $staff->user_name
-                            ?? $staff->staff_code
-                            ?? 'STF-' . $staff->id,
-
-                        'skill' =>
-                            $staff->skill
-                            ?? $staff->role
-                            ?? 'N/A',
-
-                        'total_present' =>
-                            $attendances
-                                ->where(
-                                    'status',
-                                    'Present'
-                                )
-                                ->count(),
-
-                        'total_late' =>
-                            $attendances
-                                ->where(
-                                    'status',
-                                    'Late'
-                                )
-                                ->count(),
-
-                        'total_absent' =>
-                            $attendances
-                                ->where(
-                                    'status',
-                                    'Absent'
-                                )
-                                ->count(),
-
-                        'total_leave' =>
-                            $attendances
-                                ->where(
-                                    'status',
-                                    'Leave'
-                                )
-                                ->count(),
-
-                        'total_off_day' =>
-                            $attendances
-                                ->where(
-                                    'status',
-                                    'Off Day'
-                                )
-                                ->count(),
-                    ];
-                }
-            );
-
-            return response()->json(
-                $summary,
-                200
-            );
+            return response()->json($summary, 200);
 
         } catch (\Exception $e) {
-
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Failed to fetch summary report.',
-                'error' =>
-                    $e->getMessage()
+                'message' => 'Failed to fetch summary report.',
+                'error' => $e->getMessage(),
             ], 500);
         }
     }
+
 
     /**
      * ============================================================
      * SINGLE STAFF YEARLY REPORT
      * ============================================================
      */
-    public function singleStaffYearlyReport(
-        $id,
-        Request $request
-    ) {
-        $year =
-            $request->input(
-                'year',
-                date('Y')
-            );
+
+    public function singleStaffYearlyReport($id, Request $request)
+    {
+        $year = $request->input('year', date('Y'));
 
         try {
-
-            /**
-             * BranchContext protects staff lookup.
-             */
-            $staff =
-                $this
-                    ->staffQuery()
-                    ->findOrFail($id);
+            $staff = $this->staffQuery()->findOrFail($id);
 
             $monthlyReports = [];
 
-            for (
-                $month = 1;
-                $month <= 12;
-                $month++
-            ) {
+            for ($month = 1; $month <= 12; $month++) {
+                $monthName = Carbon::create()->month($month)->format('F');
 
-                $monthName =
-                    Carbon::create()
-                        ->month($month)
-                        ->format('F');
+                $attendanceDates = $this->attendanceQuery()
+                    ->whereYear('date', $year)
+                    ->whereMonth('date', $month)
+                    ->select('date')
+                    ->distinct()
+                    ->pluck('date')
+                    ->map(fn ($date) => Carbon::parse($date)->toDateString())
+                    ->filter(function ($date) {
+                        return !Holiday::where('start_date', '<=', $date)
+                            ->where('end_date', '>=', $date)
+                            ->exists();
+                    })
+                    ->values();
 
-                /**
-                 * Attendance follows current branch.
-                 */
-                $attendances =
-                    $this
-                        ->attendanceQuery()
-                        ->where(
-                            'staff_id',
-                            $id
-                        )
-                        ->whereYear(
-                            'date',
-                            $year
-                        )
-                        ->whereMonth(
-                            'date',
-                            $month
-                        )
-                        ->get();
+                $attendances = $this->attendanceQuery()
+                    ->where('staff_id', $id)
+                    ->whereYear('date', $year)
+                    ->whereMonth('date', $month)
+                    ->get()
+                    ->filter(function ($attendance) {
+                        return !Holiday::where('start_date', '<=', $attendance->date)
+                            ->where('end_date', '>=', $attendance->date)
+                            ->exists();
+                    });
 
-                /**
-                 * Holiday dates বাদ
-                 */
-                $attendances =
-                    $attendances->filter(
-                        function ($attendance) {
+                $staffDates = $attendances
+                    ->map(fn ($attendance) => Carbon::parse($attendance->date)->toDateString())
+                    ->unique();
 
-                            return !Holiday::where(
-                                'start_date',
-                                '<=',
-                                $attendance->date
-                            )
-                                ->where(
-                                    'end_date',
-                                    '>=',
-                                    $attendance->date
-                                )
-                                ->exists();
-                        }
-                    );
+                // কোনো attendance record না থাকলে absent।
+                $missingDays = $attendanceDates->diff($staffDates)->count();
+
+                $present = $attendances->where('status', 'Present')->count();
+                $late = $attendances->where('status', 'Late')->count();
+                $absent = $attendances->where('status', 'Absent')->count();
+                $leave = $attendances->where('status', 'Leave')->count();
+                $offDay = $attendances->where('status', 'Off Day')->count();
 
                 $monthlyReports[] = [
-
-                    'month_number' =>
-                        $month,
-
-                    'month_name' =>
-                        $monthName,
-
-                    'present' =>
-                        $attendances
-                            ->where(
-                                'status',
-                                'Present'
-                            )
-                            ->count(),
-
-                    'late' =>
-                        $attendances
-                            ->where(
-                                'status',
-                                'Late'
-                            )
-                            ->count(),
-
-                    'absent' =>
-                        $attendances
-                            ->where(
-                                'status',
-                                'Absent'
-                            )
-                            ->count(),
-
-                    'leave' =>
-                        $attendances
-                            ->where(
-                                'status',
-                                'Leave'
-                            )
-                            ->count(),
-
-                    'off_day' =>
-                        $attendances
-                            ->where(
-                                'status',
-                                'Off Day'
-                            )
-                            ->count(),
-
-                    'total_days' =>
-                        $attendances->count(),
+                    'month_number' => $month,
+                    'month_name' => $monthName,
+                    'present' => $present,
+                    'late' => $late,
+                    'absent' => $absent + $missingDays,
+                    'leave' => $leave,
+                    'off_day' => $offDay,
+                    'total_days' => $attendanceDates->count(),
                 ];
             }
 
             return response()->json([
                 'status' => true,
-
-                'staff' =>
-                    $staff,
-
-                'year' =>
-                    $year,
-
-                'monthly_reports' =>
-                    $monthlyReports
-
+                'staff' => $staff,
+                'year' => $year,
+                'monthly_reports' => $monthlyReports,
             ], 200);
 
         } catch (\Exception $e) {
-
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Failed to fetch yearly report.',
-                'error' =>
-                    $e->getMessage()
+                'message' => 'Failed to fetch yearly report.',
+                'error' => $e->getMessage(),
             ], 500);
         }
     }
+
 
     /**
      * ============================================================

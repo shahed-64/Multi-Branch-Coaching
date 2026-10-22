@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AcademicSession;
 use App\Models\OtherPayment;
 use App\Models\Payment;
 use App\Models\Student;
@@ -10,7 +11,7 @@ use App\Services\BranchContext;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use App\Models\AcademicSession;
+
 class PaymentController extends Controller
 {
     private function staff()
@@ -38,7 +39,7 @@ class PaymentController extends Controller
             'Manager',
             'Branch Manager',
             'Branch Accountant',
-        ])) {
+        ], true)) {
             return response()->json([
                 'status' => false,
                 'message' => 'You are not authorized to access payments.',
@@ -49,7 +50,7 @@ class PaymentController extends Controller
             in_array($staff->role, [
                 'Branch Manager',
                 'Branch Accountant',
-            ]) && empty($staff->branch_id)
+            ], true) && empty($staff->branch_id)
         ) {
             return response()->json([
                 'status' => false,
@@ -65,9 +66,6 @@ class PaymentController extends Controller
         return $this->staff()?->role === 'Manager';
     }
 
-    /**
-     * Payment query with branch isolation.
-     */
     private function branchPaymentQuery()
     {
         $query = Payment::query();
@@ -92,7 +90,7 @@ class PaymentController extends Controller
         if (in_array($staff->role, [
             'Branch Manager',
             'Branch Accountant',
-        ])) {
+        ], true)) {
             if (empty($staff->branch_id)) {
                 return $query->whereRaw('1 = 0');
             }
@@ -105,9 +103,6 @@ class PaymentController extends Controller
         return $query->whereRaw('1 = 0');
     }
 
-    /**
-     * Student query with branch isolation.
-     */
     private function branchStudentQuery()
     {
         $query = Student::query();
@@ -128,7 +123,7 @@ class PaymentController extends Controller
         if (in_array($staff->role, [
             'Branch Manager',
             'Branch Accountant',
-        ])) {
+        ], true)) {
             if (empty($staff->branch_id)) {
                 return $query->whereRaw('1 = 0');
             }
@@ -139,9 +134,6 @@ class PaymentController extends Controller
         return $query->whereRaw('1 = 0');
     }
 
-    /**
-     * Session enrollment query with branch isolation.
-     */
     private function branchSessionQuery()
     {
         $query = StudentSession::query();
@@ -162,7 +154,7 @@ class PaymentController extends Controller
         if (in_array($staff->role, [
             'Branch Manager',
             'Branch Accountant',
-        ])) {
+        ], true)) {
             if (empty($staff->branch_id)) {
                 return $query->whereRaw('1 = 0');
             }
@@ -197,7 +189,7 @@ class PaymentController extends Controller
         if (in_array($staff->role, [
             'Branch Manager',
             'Branch Accountant',
-        ])) {
+        ], true)) {
             if (empty($staff->branch_id)) {
                 return $query->whereRaw('1 = 0');
             }
@@ -228,7 +220,7 @@ class PaymentController extends Controller
         if (in_array($staff->role, [
             'Branch Manager',
             'Branch Accountant',
-        ])) {
+        ], true)) {
             return !empty($staff->branch_id)
                 && (int) $student->branch_id === (int) $staff->branch_id;
         }
@@ -236,24 +228,27 @@ class PaymentController extends Controller
         return false;
     }
 
-    /**
-     * Verify the session belongs to the selected student
-     * and is accessible in the current branch context.
-     */
+    private function findAllowedStudent($id): Student
+    {
+        return $this->branchStudentQuery()
+            ->whereKey($id)
+            ->firstOrFail();
+    }
+
     private function findAllowedStudentSession(
         int $studentId,
         int $sessionId
     ): ?StudentSession {
         return $this->branchSessionQuery()
-            ->where('id', $sessionId)
+            ->whereKey($sessionId)
             ->where('student_id', $studentId)
             ->first();
     }
 
     /**
-     * PAYMENT DASHBOARD AND LIST
+     * PAYMENT LEDGER
      */
-    public function index(Request $request)
+    public function ledger(Request $request)
     {
         $authorization = $this->authorizeAccess();
 
@@ -261,147 +256,502 @@ class PaymentController extends Controller
             return $authorization;
         }
 
-        $paymentQuery = $this->branchPaymentQuery();
+        $validated = $request->validate([
+            'start_date' => 'required|date',
+            'end_date' => 'required|date|after_or_equal:start_date',
+        ]);
 
-        $totalPaidAmount = (clone $paymentQuery)->sum('paid_amount');
-        $totalDueAmount = (clone $paymentQuery)->sum('due_amount');
-
-        $totalStudents = $this->branchStudentQuery()->count();
-
-        $dueStudents = (clone $paymentQuery)
-            ->where('due_amount', '>', 0)
-            ->distinct()
-            ->count('student_id');
-
-        $todayPayments = (clone $paymentQuery)
-            ->whereDate('payment_date', today());
-
-        $todayCollection = (clone $todayPayments)->sum('paid_amount');
-        $todayExamFee = (clone $todayPayments)->sum('exam_fee');
-        $todayAdmissionFee = (clone $todayPayments)->sum('admission_fee');
-
-        $todayOtherCollection = (clone $this->branchOtherPaymentQuery())
-            ->whereDate('payment_date', today())
-            ->sum('total_amount');
-
-        $todayCollection +=
-            $todayExamFee +
-            $todayAdmissionFee +
-            $todayOtherCollection;
-
-        $thisMonthCollection = (clone $paymentQuery)
-            ->whereMonth('payment_date', now()->month)
-            ->whereYear('payment_date', now()->year)
-            ->select(DB::raw(
-                'SUM(
-                    COALESCE(paid_amount, 0) +
-                    COALESCE(admission_fee, 0) +
-                    COALESCE(exam_fee, 0)
-                ) as total'
-            ))
-            ->value('total');
-
-        $otherPaymentCollection = (clone $this->branchOtherPaymentQuery())
-            ->whereMonth('payment_date', now()->month)
-            ->whereYear('payment_date', now()->year)
-            ->sum('total_amount');
-
-        $thisMonthCollection =
-            (float) $thisMonthCollection + $otherPaymentCollection;
-
-        $thisMonthDue = (clone $paymentQuery)
-            ->whereMonth('payment_date', now()->month)
-            ->whereYear('payment_date', now()->year)
-            ->sum('due_amount');
-
-        $monthlyPayments = (clone $paymentQuery)
-            ->select(
-                DB::raw('MONTH(payment_date) as month'),
-                DB::raw('SUM(paid_amount) as total')
-            )
-            ->whereYear('payment_date', now()->year)
-            ->groupBy(DB::raw('MONTH(payment_date)'))
-            ->orderBy('month')
-            ->get();
-
-        $recentPayments = (clone $paymentQuery)
-            ->with(['student', 'studentSession'])
-            ->whereDate(
-                'payment_date',
-                '>=',
-                Carbon::today()->subDays(6)
-            )
-            ->orderByDesc('payment_date')
-            ->get();
-
-        $currentMonth = now()->format('F');
-
-        /*
-         * Count current-month unpaid session enrollments.
-         */
-        $sessions = $this->branchSessionQuery();
-
-        $runningMonthUnpaidStudents = (clone $sessions)
-            ->whereNotExists(function ($query) use ($currentMonth) {
-                $query->select(DB::raw(1))
-                    ->from('payments')
-                    ->whereColumn(
-                        'payments.student_session_id',
-                        'student_sessions.id'
-                    )
-                    ->where('payments.month', $currentMonth);
-            })
-            ->count();
-
-        $totalUnpaidStudents = (clone $sessions)
-            ->whereNotExists(function ($query) {
-                $query->select(DB::raw(1))
-                    ->from('payments')
-                    ->whereColumn(
-                        'payments.student_session_id',
-                        'student_sessions.id'
-                    );
-            })
-            ->count();
-
-        $payments = (clone $paymentQuery)
+        $payments = $this->branchPaymentQuery()
             ->with([
-                'student' => function ($query) {
-                    $query->select(
-                        'id',
-                        'full_name',
-                        'student_id',
-                        'class_id',
-                        'branch_id'
-                    );
-                },
-                'studentSession',
+                'student',
+                'studentSession.academicSession',
+                'studentSession.classInfo',
+                'studentSession.section',
+                'studentSession.shift',
+                'studentSession.classGroup',
             ])
-            ->latest()
-            ->paginate(20);
+            ->whereDate('payment_date', '>=', $validated['start_date'])
+            ->whereDate('payment_date', '<=', $validated['end_date'])
+            ->where(function ($query) {
+                $query->where('paid_amount', '>', 0)
+                    ->orWhere('due_payment_amount', '>', 0);
+            })
+            ->orderBy('payment_date')
+            ->orderBy('id')
+            ->get();
 
         return response()->json([
             'status' => true,
-            'message' => 'Payments fetched successfully',
-            'total_paid_amount' => $totalPaidAmount,
-            'total_due_amount' => $totalDueAmount,
-            'total_students' => $totalStudents,
-            'due_students' => $dueStudents,
-            'today_collection' => $todayCollection,
-            'this_month_collection' => $thisMonthCollection,
-            'this_month_due' => $thisMonthDue,
-            'running_month_unpaid_students' => $runningMonthUnpaidStudents,
-            'total_unpaid_students' => $totalUnpaidStudents,
-            'monthly_payments' => $monthlyPayments,
-            'recent_payments' => $recentPayments,
+            'message' => 'Payment ledger fetched successfully.',
             'payments' => $payments,
         ]);
     }
 
     /**
+     * PAYMENT DASHBOARD AND LIST
+     */
+public function index(Request $request)
+{
+    $authorization = $this->authorizeAccess();
+
+    if ($authorization) {
+        return $authorization;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Active Academic Session
+    |--------------------------------------------------------------------------
+    | Manager: selected branch অথবা all branches-এর active sessions.
+    | Branch Manager / Branch Accountant: নিজের branch-এর active session.
+    */
+
+    $activeStudentSessions = $this->branchSessionQuery()
+        ->whereHas('academicSession', function ($query) {
+            $query->where('is_active', true);
+        });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Active Session Payment Queries
+    |--------------------------------------------------------------------------
+    */
+
+    $paymentQuery = $this->branchPaymentQuery()
+        ->whereHas('studentSession.academicSession', function ($query) {
+            $query->where('is_active', true);
+        });
+
+    $otherPaymentQuery = $this->branchOtherPaymentQuery()
+        ->whereHas('studentSession.academicSession', function ($query) {
+            $query->where('is_active', true);
+        });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Total Collection
+    |--------------------------------------------------------------------------
+    */
+
+    $totalPaidAmount =
+        (float) (clone $paymentQuery)->sum('paid_amount')
+        + (float) (clone $paymentQuery)->sum('due_payment_amount');
+
+    $totalDueAmount = max(
+        0,
+        (float) (clone $paymentQuery)->sum('due_amount')
+        - (float) (clone $paymentQuery)->sum('due_payment_amount')
+    );
+
+    /*
+    |--------------------------------------------------------------------------
+    | Active Session Students
+    |--------------------------------------------------------------------------
+    */
+
+    $totalStudents = (clone $activeStudentSessions)
+        ->count();
+
+    $dueStudents = (clone $paymentQuery)
+        ->select(
+            'student_id',
+            DB::raw(
+                'SUM(COALESCE(due_amount, 0))
+                - SUM(COALESCE(due_payment_amount, 0)) AS remaining_due'
+            )
+        )
+        ->groupBy('student_id')
+        ->havingRaw(
+            'SUM(COALESCE(due_amount, 0))
+            - SUM(COALESCE(due_payment_amount, 0)) > 0'
+        )
+        ->get()
+        ->count();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Other Collection
+    |--------------------------------------------------------------------------
+    */
+
+    $totalOtherPayment = (float) (clone $otherPaymentQuery)
+        ->sum('total_amount');
+
+    $admissionExamCollection = (float) (clone $otherPaymentQuery)
+        ->whereIn('payment_type', ['Admission Fee', 'Exam Fee'])
+        ->sum('total_amount');
+
+    $thisMonthOtherCollection = (float) (clone $otherPaymentQuery)
+        ->whereMonth('payment_date', now()->month)
+        ->whereYear('payment_date', now()->year)
+        ->sum('total_amount');
+
+    /*
+    |--------------------------------------------------------------------------
+    | Today's Collection
+    |--------------------------------------------------------------------------
+    */
+
+    $todayDate = Carbon::now('Asia/Dhaka')->toDateString();
+
+    $todayPayments = (clone $paymentQuery)
+        ->whereDate('payment_date', $todayDate);
+
+    $todayCollection =
+        (float) (clone $todayPayments)->sum('paid_amount')
+        + (float) (clone $todayPayments)->sum('due_payment_amount');
+
+    $todayCollection += (float) (clone $otherPaymentQuery)
+        ->whereDate('payment_date', $todayDate)
+        ->sum('total_amount');
+
+    /*
+    |--------------------------------------------------------------------------
+    | Current Calendar Month
+    |--------------------------------------------------------------------------
+    */
+
+    $thisMonthPayments = (clone $paymentQuery)
+        ->whereMonth('payment_date', now()->month)
+        ->whereYear('payment_date', now()->year);
+
+    $currentMonthName = now()->format('F');
+
+    $thisMonthPaidAmount = (float) (clone $paymentQuery)
+        ->where('month', $currentMonthName)
+        ->sum('paid_amount');
+
+    $thisMonthPaidAmount += (float) (clone $paymentQuery)
+        ->where('due_month', $currentMonthName)
+        ->sum('due_payment_amount');
+
+    $thisMonthDue = max(
+        0,
+        (float) (clone $thisMonthPayments)->sum('due_amount')
+        - (float) (clone $thisMonthPayments)->sum('due_payment_amount')
+    );
+
+    $thisMonthCollection =
+        (float) (clone $thisMonthPayments)->sum('paid_amount')
+        + (float) (clone $thisMonthPayments)->sum('due_payment_amount')
+        + $thisMonthOtherCollection;
+
+    /*
+    |--------------------------------------------------------------------------
+    | Monthly Collection Chart
+    |--------------------------------------------------------------------------
+    */
+
+    $studentMonthlyPayments = (clone $paymentQuery)
+        ->select(
+            DB::raw('MONTH(payment_date) as month'),
+            DB::raw(
+                'SUM(
+                    COALESCE(paid_amount, 0)
+                    + COALESCE(due_payment_amount, 0)
+                ) as total'
+            )
+        )
+        ->whereYear('payment_date', now()->year)
+        ->groupBy(DB::raw('MONTH(payment_date)'))
+        ->get();
+
+    $otherMonthlyPayments = (clone $otherPaymentQuery)
+        ->select(
+            DB::raw('MONTH(payment_date) as month'),
+            DB::raw('SUM(COALESCE(total_amount, 0)) as total')
+        )
+        ->whereYear('payment_date', now()->year)
+        ->groupBy(DB::raw('MONTH(payment_date)'))
+        ->get();
+
+    $monthlyTotals = [];
+
+    foreach ($studentMonthlyPayments as $item) {
+        $monthlyTotals[(int) $item->month] = (float) $item->total;
+    }
+
+    foreach ($otherMonthlyPayments as $item) {
+        $month = (int) $item->month;
+
+        $monthlyTotals[$month] =
+            ($monthlyTotals[$month] ?? 0) + (float) $item->total;
+    }
+
+    ksort($monthlyTotals);
+
+    $monthlyPayments = collect($monthlyTotals)
+        ->map(fn ($total, $month) => [
+            'month' => (int) $month,
+            'total' => (float) $total,
+        ])
+        ->values();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Recent Payments
+    |--------------------------------------------------------------------------
+    */
+
+    $recentPayments = (clone $paymentQuery)
+        ->with(['student', 'studentSession'])
+        ->whereDate(
+            'payment_date',
+            '>=',
+            Carbon::now('Asia/Dhaka')->subDays(6)->toDateString()
+        )
+        ->orderByDesc('payment_date')
+        ->get();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Active Session Unpaid Students
+    |--------------------------------------------------------------------------
+    */
+
+    $currentMonth = now()->format('F');
+
+    $runningMonthUnpaidStudents = (clone $activeStudentSessions)
+        ->whereNotExists(function ($query) use ($currentMonth) {
+            $query->select(DB::raw(1))
+                ->from('payments')
+                ->whereColumn(
+                    'payments.student_session_id',
+                    'student_sessions.id'
+                )
+                ->where('payments.month', $currentMonth);
+        })
+        ->count();
+
+    $totalUnpaidStudents = (clone $activeStudentSessions)
+        ->whereNotExists(function ($query) {
+            $query->select(DB::raw(1))
+                ->from('payments')
+                ->whereColumn(
+                    'payments.student_session_id',
+                    'student_sessions.id'
+                );
+        })
+        ->count();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Paginated Payments
+    |--------------------------------------------------------------------------
+    */
+
+    $payments = (clone $paymentQuery)
+        ->with([
+            'student' => function ($query) {
+                $query->select(
+                    'id',
+                    'full_name',
+                    'student_id',
+                    'class_id',
+                    'branch_id'
+                );
+            },
+            'studentSession',
+        ])
+        ->latest()
+        ->paginate(20);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Response
+    |--------------------------------------------------------------------------
+    */
+
+    return response()->json([
+        'status' => true,
+        'message' => 'Payments fetched successfully',
+
+        'total_paid_amount' => $totalPaidAmount,
+        'total_due_amount' => $totalDueAmount,
+        'total_students' => $totalStudents,
+        'due_students' => $dueStudents,
+
+        'today_collection' => $todayCollection,
+        'this_month_paid_amount' => $thisMonthPaidAmount,
+        'this_month_collection' => $thisMonthCollection,
+        'this_month_due' => $thisMonthDue,
+
+        'total_other_payment' => $totalOtherPayment,
+        'admission_exam_collection' => $admissionExamCollection,
+        'this_month_other_collection' => $thisMonthOtherCollection,
+
+        'running_month_unpaid_students' => $runningMonthUnpaidStudents,
+        'total_unpaid_students' => $totalUnpaidStudents,
+
+        'monthly_payments' => $monthlyPayments,
+        'recent_payments' => $recentPayments,
+        'payments' => $payments,
+    ]);
+}
+    /**
      * CREATE SESSION-WISE PAYMENT
      */
-    public function store(Request $request)
+/**
+ * CREATE SESSION-WISE PAYMENT
+ * Supports running month payment + previous due payment in one row.
+ */
+public function store(Request $request)
+{
+    $authorization = $this->authorizeAccess();
+
+    if ($authorization) {
+        return $authorization;
+    }
+
+    $validated = $request->validate([
+        'student_id' => 'required|integer|exists:students,id',
+        'student_session_id' => 'required|integer|exists:student_sessions,id',
+        'paid_amount' => 'required|numeric|min:0',
+        'payment_method' => 'nullable|string',
+        'payment_date' => 'nullable|date',
+        'month' => 'required|string|in:January,February,March,April,May,June,July,August,September,October,November,December',
+        'admission_fee' => 'nullable|numeric|min:0',
+        'exam_fee' => 'nullable|numeric|min:0',
+        'due_month' => 'nullable|string|in:January,February,March,April,May,June,July,August,September,October,November,December',
+        'due_payment_amount' => 'nullable|numeric|min:0',
+    ]);
+
+    $student = $this->branchStudentQuery()
+        ->whereKey($validated['student_id'])
+        ->first();
+
+    if (!$student) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Student not found in your allowed branch.',
+        ], 404);
+    }
+
+    $studentSession = $this->findAllowedStudentSession(
+        (int) $student->id,
+        (int) $validated['student_session_id']
+    );
+
+    if (!$studentSession) {
+        return response()->json([
+            'status' => false,
+            'message' => 'The selected session does not belong to this student or branch.',
+        ], 422);
+    }
+
+    $dueMonth = $validated['due_month'] ?? null;
+    $duePaymentAmount = (float) ($validated['due_payment_amount'] ?? 0);
+    $paidAmount = (float) $validated['paid_amount'];
+    $amount = (float) $studentSession->monthly_fee;
+
+    // Due payment month and amount must be supplied together.
+    if (($dueMonth && $duePaymentAmount <= 0)
+        || (!$dueMonth && $duePaymentAmount > 0)) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Select a due month and enter its due payment amount.',
+        ], 422);
+    }
+
+    // A month cannot be paid as its own previous due.
+    if ($dueMonth && $dueMonth === $validated['month']) {
+        return response()->json([
+            'status' => false,
+            'message' => 'The due month must be different from the running payment month.',
+        ], 422);
+    }
+
+    return DB::transaction(function () use (
+        $validated,
+        $student,
+        $studentSession,
+        $dueMonth,
+        $duePaymentAmount,
+        $paidAmount,
+        $amount
+    ) {
+        // Prevent duplicate regular payment for the running month.
+        $exists = $this->branchPaymentQuery()
+            ->where('student_session_id', $studentSession->id)
+            ->where('month', $validated['month'])
+            ->lockForUpdate()
+            ->exists();
+
+        if ($exists) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Payment for this month already exists in this academic session.',
+            ], 422);
+        }
+
+        // Check whether the selected previous month has an outstanding due.
+        if ($dueMonth && $duePaymentAmount > 0) {
+            $dueRecords = $this->branchPaymentQuery()
+                ->where('student_session_id', $studentSession->id)
+                ->where('month', $dueMonth)
+                ->lockForUpdate()
+                ->get();
+
+            $previousDue = (float) $dueRecords->sum('due_amount')
+                - (float) $dueRecords->sum('due_payment_amount');
+
+            $previousDue = max(0, $previousDue);
+
+            if ($previousDue <= 0) {
+                return response()->json([
+                    'status' => false,
+                    'message' => "There is no outstanding due for {$dueMonth}.",
+                ], 422);
+            }
+
+            if ($duePaymentAmount > $previousDue) {
+                return response()->json([
+                    'status' => false,
+                    'message' => "The due payment cannot exceed the outstanding {$dueMonth} due of {$previousDue}.",
+                ], 422);
+            }
+        }
+
+        // The regular payment applies only to the running month's fee.
+        $dueAmount = max(0, $amount - $paidAmount);
+
+        $payment = Payment::create([
+            'student_id' => $student->id,
+            'student_session_id' => $studentSession->id,
+
+            'amount' => $amount,
+            'paid_amount' => $paidAmount,
+            'due_amount' => $dueAmount,
+
+            'payment_method' => $validated['payment_method'] ?? 'Cash',
+            'payment_date' => $validated['payment_date']
+                ?? now()->toDateString(),
+
+            'month' => $validated['month'],
+
+            'admission_fee' => $validated['admission_fee'] ?? 0,
+            'exam_fee' => $validated['exam_fee'] ?? 0,
+
+            'due_month' => $dueMonth,
+            'due_payment_amount' => $duePaymentAmount,
+
+            'status' => $dueAmount <= 0 ? 'paid' : 'due',
+        ]);
+
+        return response()->json([
+            'status' => true,
+            'message' => 'Payment created successfully.',
+            'payment' => $payment->load([
+                'student',
+                'studentSession',
+            ]),
+        ]);
+    });
+}
+    /**
+     * COLLECT AN EXISTING PAYMENT'S OUTSTANDING DUE
+     */
+    public function storeDuePayment(Request $request)
     {
         $authorization = $this->authorizeAccess();
 
@@ -411,123 +761,104 @@ class PaymentController extends Controller
 
         $validated = $request->validate([
             'student_id' => 'required|integer|exists:students,id',
-            'student_session_id' => 'required|integer|exists:student_sessions,id',
-            'paid_amount' => 'required|numeric|min:0',
-            'payment_method' => 'nullable|string',
-            'payment_date' => 'nullable|date',
-            'month' => 'required|string|max:30',
-            'admission_fee' => 'nullable|numeric|min:0',
-            'exam_fee' => 'nullable|numeric|min:0',
+            'due_month' => 'required|string|in:January,February,March,April,May,June,July,August,September,October,November,December',
+            'due_payment_amount' => 'required|numeric|gt:0',
         ]);
 
         $student = $this->branchStudentQuery()
-            ->where('id', $validated['student_id'])
+            ->whereKey($validated['student_id'])
             ->first();
 
         if (!$student) {
             return response()->json([
                 'status' => false,
-                'message' => 'Student not found in your allowed branch.',
+                'message' => 'Student not found or access denied.',
             ], 404);
         }
 
-        $studentSession = $this->findAllowedStudentSession(
-            (int) $student->id,
-            (int) $validated['student_session_id']
-        );
-
+        $studentSession = $this->branchSessionQuery()
+        ->where('student_id', $student->id)
+        ->orderByDesc('id')
+        ->first();
         if (!$studentSession) {
             return response()->json([
                 'status' => false,
-                'message' => 'The selected session does not belong to this student or branch.',
+                'message' => 'No active session found for this student.',
             ], 422);
         }
 
-        return DB::transaction(function () use ($validated, $student, $studentSession) {
-            $exists = Payment::query()
-                ->where('student_session_id', $studentSession->id)
-                ->where('month', $validated['month'])
-                ->lockForUpdate()
-                ->exists();
+        $payment = Payment::create([
+            'student_id' => $student->id,
+            'student_session_id' => $studentSession->id,
 
-            if ($exists) {
-                return response()->json([
-                    'status' => false,
-                    'message' => 'Payment for this month already exists in this academic session.',
-                ], 422);
-            }
+            'amount' => 0,
+            'paid_amount' => 0,
+            'admission_fee' => 0,
+            'exam_fee' => 0,
+            'due_amount' => 0,
 
-            $amount = (float) $studentSession->monthly_fee;
-            $paidAmount = (float) $validated['paid_amount'];
-            $dueAmount = $amount - $paidAmount;
+            'payment_method' => 'Cash',
+            'payment_date' => now()->toDateString(),
+            'status' => 'paid',
 
-            $payment = Payment::create([
-                'student_id' => $student->id,
-                'student_session_id' => $studentSession->id,
-                'amount' => $amount,
-                'paid_amount' => $paidAmount,
-                'due_amount' => $dueAmount,
-                'payment_method' => $validated['payment_method'] ?? null,
-                'payment_date' => $validated['payment_date'] ?? now()->toDateString(),
-                'month' => $validated['month'],
-                'admission_fee' => $validated['admission_fee'] ?? 0,
-                'exam_fee' => $validated['exam_fee'] ?? 0,
-                'status' => $dueAmount <= 0 ? 'paid' : 'due',
-            ]);
+            'month' => null,
+            'due_month' => $validated['due_month'],
+            'due_payment_amount' => $validated['due_payment_amount'],
+        ]);
 
-            $payment->load(['student', 'studentSession']);
-
-            return response()->json([
-                'status' => true,
-                'message' => 'Payment created successfully.',
-                'payment' => $payment,
-            ]);
-        });
+        return response()->json([
+            'status' => true,
+            'message' => 'Due payment recorded successfully.',
+            'payment' => $payment,
+        ], 201);
     }
-
     /**
      * SHOW SINGLE PAYMENT
      */
-/**
- * SHOW SINGLE PAYMENT WITH ITS ORIGINAL ACADEMIC SESSION
- */
-public function show($id)
-{
-    $authorization = $this->authorizeAccess();
+    public function show($id)
+    {
+        $authorization = $this->authorizeAccess();
 
-    if ($authorization) {
-        return $authorization;
-    }
+        if ($authorization) {
+            return $authorization;
+        }
 
-    $payment = $this->branchPaymentQuery()
-        ->with([
-            'student',
-            'studentSession.classInfo',
-            'studentSession.section',
-            'studentSession.shift',
-            'studentSession.academicSession',
-            'studentSession.classGroup',
-        ])
-        ->where('id', $id)
-        ->first();
+        $payment = $this->branchPaymentQuery()
+            ->with([
+                'student',
+                'studentSession.classInfo',
+                'studentSession.section',
+                'studentSession.shift',
+                'studentSession.academicSession',
+                'studentSession.classGroup',
+            ])
+            ->whereKey($id)
+            ->first();
 
-    if (!$payment) {
+        if (!$payment) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Payment not found.',
+            ], 404);
+        }
+
         return response()->json([
-            'status' => false,
-            'message' => 'Payment not found.',
-        ], 404);
+            'status' => true,
+            'payment' => $payment,
+        ]);
     }
 
-    return response()->json([
-        'status' => true,
-        'payment' => $payment,
-    ]);
-}
     /**
      * GET PAYMENTS FOR A STUDENT
      */
     public function studentPayments($id)
     {
+        $authorization = $this->authorizeAccess();
+
+        if ($authorization) {
+            return $authorization;
+        }
+
         $student = $this->findAllowedStudent($id);
 
         $payments = $this->branchPaymentQuery()
@@ -549,10 +880,6 @@ public function show($id)
 
     /**
      * SESSION-WISE STUDENT PAYMENT REPORT
-     *
-     * Unpaid months:
-     * Admission month through current month, inclusive.
-     * Payments are checked separately for each student session.
      */
     public function studentPaymentReport()
     {
@@ -565,9 +892,7 @@ public function show($id)
         $sessions = $this->branchSessionQuery()
             ->with([
                 'student',
-                'payments' => function ($query) {
-                    $query->latest();
-                },
+                'payments' => fn ($query) => $query->latest(),
             ])
             ->get();
 
@@ -580,7 +905,12 @@ public function show($id)
                 $payments = $session->payments;
 
                 $totalPaid = (float) $payments->sum('paid_amount');
-                $totalDue = (float) $payments->sum('due_amount');
+
+                $totalDue = max(
+                    0,
+                    (float) $payments->sum('due_amount')
+                    - (float) $payments->sum('due_payment_amount')
+                );
 
                 $paidMonths = $payments
                     ->pluck('month')
@@ -597,9 +927,11 @@ public function show($id)
                     )->startOfMonth();
 
                     while ($checkMonth->lte($currentMonth)) {
-                        $monthName = $checkMonth->format('F');
-
-                        if (!in_array($monthName, $paidMonths, true)) {
+                        if (!in_array(
+                            $checkMonth->format('F'),
+                            $paidMonths,
+                            true
+                        )) {
                             $unpaidMonths++;
                         }
 
@@ -618,14 +950,12 @@ public function show($id)
                     'batch_name' => $student->batch_name ?? null,
                     'status' => $student->status ?? null,
                     'branch_id' => $session->branch_id,
-
                     'student_session_id' => $session->id,
                     'academic_session_id' => $session->academic_session_id,
                     'class_id' => $session->class_id,
                     'section_id' => $session->section_id,
                     'shift_id' => $session->shift_id,
                     'class_group_id' => $session->class_group_id,
-
                     'monthly_fee' => $monthlyFee,
                     'payments' => $payments,
                     'total_paid' => $totalPaid,
@@ -645,10 +975,10 @@ public function show($id)
         ]);
     }
 
+    /**
+     * ACADEMIC SESSION-WISE PAYMENT REGISTER
+     */
 
-/**
- * ALL REGISTER — ACADEMIC SESSION WISE PAYMENT REGISTER
- */
 public function paymentRegister(Request $request)
 {
     $authorization = $this->authorizeAccess();
@@ -664,18 +994,13 @@ public function paymentRegister(Request $request)
 
     $staff = $this->staff();
     $currentBranchId = $this->currentBranchId();
-
-    /*
-     * Manager can select a branch only when the current
-     * BranchContext is All Branches or matches that branch.
-     */
     $selectedBranchId = $validated['branch_id'] ?? null;
 
     if ($staff->role === 'Manager') {
         if (
-            $currentBranchId !== null &&
-            $selectedBranchId !== null &&
-            (int) $currentBranchId !== (int) $selectedBranchId
+            $currentBranchId !== null
+            && $selectedBranchId !== null
+            && (int) $currentBranchId !== (int) $selectedBranchId
         ) {
             return response()->json([
                 'status' => false,
@@ -688,8 +1013,8 @@ public function paymentRegister(Request $request)
         }
     } else {
         if (
-            $selectedBranchId !== null &&
-            (int) $selectedBranchId !== (int) $staff->branch_id
+            $selectedBranchId !== null
+            && (int) $selectedBranchId !== (int) $staff->branch_id
         ) {
             return response()->json([
                 'status' => false,
@@ -700,22 +1025,10 @@ public function paymentRegister(Request $request)
         $selectedBranchId = $staff->branch_id;
     }
 
-    /*
-     * Academic sessions available to the current user
-     * and selected branch.
-     */
     $availableSessionsQuery = AcademicSession::query();
 
     if ($selectedBranchId !== null) {
-        $availableSessionsQuery->where(
-            'branch_id',
-            $selectedBranchId
-        );
-    } elseif ($staff->role !== 'Manager') {
-        $availableSessionsQuery->where(
-            'branch_id',
-            $staff->branch_id
-        );
+        $availableSessionsQuery->where('branch_id', $selectedBranchId);
     }
 
     $availableSessions = (clone $availableSessionsQuery)
@@ -729,19 +1042,12 @@ public function paymentRegister(Request $request)
             'is_active',
         ]);
 
-    /*
-     * If no session is selected, use active sessions.
-     * In All Branches mode, each branch can have its own
-     * active academic session.
-     */
     if (!empty($validated['academic_session_id'])) {
         $selectedSessionId = (int) $validated['academic_session_id'];
 
-        $sessionExists = $availableSessions->contains(
+        if (!$availableSessions->contains(
             fn ($session) => (int) $session->id === $selectedSessionId
-        );
-
-        if (!$sessionExists) {
+        )) {
             return response()->json([
                 'status' => false,
                 'message' => 'The selected academic session is not available for this branch.',
@@ -758,10 +1064,6 @@ public function paymentRegister(Request $request)
             ->all();
     }
 
-    /*
-     * Fetch session enrollment records, not the student's
-     * current class fields. This preserves historical data.
-     */
     $sessionsQuery = $this->branchSessionQuery()
         ->whereIn('academic_session_id', $sessionIds);
 
@@ -777,9 +1079,9 @@ public function paymentRegister(Request $request)
             'section',
             'shift',
             'classGroup',
-            'payments' => function ($query) {
-                $query->orderBy('payment_date');
-            },
+            'payments' => fn ($query) => $query
+                ->orderBy('payment_date')
+                ->orderBy('id'),
         ])
         ->orderBy('class_id')
         ->orderBy('section_id')
@@ -789,68 +1091,103 @@ public function paymentRegister(Request $request)
         ->values();
 
     $months = [
-        'January',
-        'February',
-        'March',
-        'April',
-        'May',
-        'June',
-        'July',
-        'August',
-        'September',
-        'October',
-        'November',
-        'December',
+        'January', 'February', 'March', 'April',
+        'May', 'June', 'July', 'August',
+        'September', 'October', 'November', 'December',
     ];
 
-    /*
-     * Each student gets one entry per month.
-     * No payment record = Unpaid.
-     * Existing payment record = actual paid amount.
-     */
     $students = $studentSessions->map(function ($session) use ($months) {
         $student = $session->student;
 
+        // Regular monthly payment records: month field is populated.
         $paymentsByMonth = $session->payments
+            ->filter(fn ($payment) => !empty($payment->month))
             ->keyBy('month');
 
+        // Separate due-payment records: due_month field is populated.
+        $duePaymentsByMonth = $session->payments
+            ->filter(fn ($payment) => !empty($payment->due_month))
+            ->groupBy('due_month');
+
         $monthlyPayments = collect($months)->map(
-            function ($month) use ($paymentsByMonth) {
-                $payment = $paymentsByMonth->get($month);
+    function ($month) use ($paymentsByMonth, $duePaymentsByMonth) {
+        // এই মাসের নিয়মিত payment
+        $payment = $paymentsByMonth->get($month);
 
-                if (!$payment) {
-                    return [
-                        'month' => $month,
-                        'payment_id' => null,
-                        'paid_amount' => null,
-                        'due_amount' => null,
-                        'status' => 'unpaid',
-                    ];
-                }
+        // এই মাসের বকেয়া পরিশোধের record
+        $duePaymentRows = $duePaymentsByMonth->get(
+            $month,
+            collect()
+        );
 
-                return [
-                    'month' => $month,
-                    'payment_id' => $payment->id,
-                    'paid_amount' => (float) $payment->paid_amount,
-                    'due_amount' => (float) $payment->due_amount,
-                    'status' => (float) $payment->paid_amount > 0
-                        ? 'paid'
-                        : 'unpaid',
-                ];
-            }
-        )->values();
+        $regularPaid = (float) ($payment?->paid_amount ?? 0);
+
+        $regularDueCollected = (float) (
+            $payment?->due_payment_amount ?? 0
+        );
+
+        $separateDueCollected = (float) $duePaymentRows
+            ->sum('due_payment_amount');
+
+        // শুধু এই মাসের payment এবং এই মাসের due collection যোগ হবে।
+       // এই মাসের নিয়মিত payment amount
+        $regularPaid = (float) ($payment?->paid_amount ?? 0);
+
+        // এই মাসের due হিসেবে আদায় করা টাকা
+        $regularDueCollected = (float) ($payment?->due_payment_amount ?? 0);
+
+        $separateDueCollected = (float) $duePaymentRows
+            ->sum('due_payment_amount');
+
+        // এই মাসের ঘরে শুধু এই মাসের payment এবং এই মাসের due collection যোগ হবে।
+        $totalPaid = $regularPaid
+            + $regularDueCollected
+            + $separateDueCollected;
+
+        // অন্য মাসের due payment যেন running month's Paid-এ যোগ না হয়।
+        if ($payment && $payment->due_month !== $month) {
+            $totalPaid -= $regularDueCollected;
+        }
+
+        $regularDue = (float) ($payment?->due_amount ?? 0);
+
+        // এই মাসের বকেয়া থেকে এই মাসের জন্য আদায় করা টাকা বাদ যাবে।
+        $remainingDue = max(
+            0,
+            $regularDue
+                - $regularDueCollected
+                - $separateDueCollected
+        );
+
+        if (!$payment && $duePaymentRows->isEmpty()) {
+            return [
+                'month' => $month,
+                'payment_id' => null,
+                'paid_amount' => null,
+                'due_amount' => null,
+                'status' => 'unpaid',
+            ];
+        }
+
+        return [
+            'month' => $month,
+            'payment_id' => $payment?->id,
+            'paid_amount' => $totalPaid,
+            'due_amount' => $remainingDue,
+            'status' => $totalPaid > 0 ? 'paid' : 'unpaid',
+        ];
+    }
+)->values();
 
         return [
             'student_session_id' => $session->id,
             'academic_session_id' => $session->academic_session_id,
             'academic_session' => $session->academicSession,
-
             'student_id' => $student->id,
             'student_code' => $student->student_id,
             'full_name' => $student->full_name,
             'phone' => $student->phone,
             'image_url' => $student->image_url,
-
             'branch_id' => $session->branch_id,
             'class_id' => $session->class_id,
             'class_info' => $session->classInfo,
@@ -860,15 +1197,11 @@ public function paymentRegister(Request $request)
             'shift' => $session->shift,
             'class_group_id' => $session->class_group_id,
             'class_group' => $session->classGroup,
-
             'monthly_fee' => (float) $session->monthly_fee,
             'monthly_payments' => $monthlyPayments,
         ];
     });
 
-    /*
-     * Group students by their session-specific class.
-     */
     $classGroups = $students
         ->groupBy(fn ($student) => $student['class_id'])
         ->map(function ($classStudents, $classId) {
@@ -890,13 +1223,11 @@ public function paymentRegister(Request $request)
         'total_students' => $students->count(),
         'class_groups' => $classGroups,
     ]);
-  }
+}
 
 
     /**
      * UPDATE PAYMENT
-     *
-     * The original session cannot be changed during payment editing.
      */
     public function update(Request $request, $id)
     {
@@ -906,9 +1237,7 @@ public function paymentRegister(Request $request)
             return $authorization;
         }
 
-        $payment = $this->branchPaymentQuery()
-            ->where('id', $id)
-            ->first();
+        $payment = $this->branchPaymentQuery()->whereKey($id)->first();
 
         if (!$payment) {
             return response()->json([
@@ -975,7 +1304,9 @@ public function paymentRegister(Request $request)
                 ?? $payment->admission_fee,
             'exam_fee' => $validated['exam_fee']
                 ?? $payment->exam_fee,
-            'status' => $dueAmount <= 0 ? 'paid' : 'due',
+            'status' => (
+                $paidAmount + (float) $payment->due_payment_amount
+            ) >= $amount ? 'paid' : 'due',
         ]);
 
         return response()->json([
@@ -996,9 +1327,7 @@ public function paymentRegister(Request $request)
             return $authorization;
         }
 
-        $payment = $this->branchPaymentQuery()
-            ->where('id', $id)
-            ->first();
+        $payment = $this->branchPaymentQuery()->whereKey($id)->first();
 
         if (!$payment) {
             return response()->json([

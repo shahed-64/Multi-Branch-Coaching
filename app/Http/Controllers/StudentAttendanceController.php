@@ -565,10 +565,7 @@ class StudentAttendanceController extends Controller
                 'integer',
                 'exists:academic_sessions,id',
             ],
-            'month' => [
-                'nullable',
-                'date_format:Y-m',
-            ],
+            'month' => ['nullable', 'date_format:Y-m'],
         ]);
 
         $academicSession = $this->accessibleSession(
@@ -585,41 +582,69 @@ class StudentAttendanceController extends Controller
             explode('-', $month)
         );
 
-        $query = StudentAttendance::query()
-            ->whereYear('date', $year)
-            ->whereMonth('date', $monthNumber)
-            ->whereHas('studentSession', function ($query) use (
-                $academicSession
-            ) {
-                $query->where(
-                    'academic_session_id',
-                    $academicSession->id
-                );
-            });
-
         $branchId = $this->currentBranchId();
 
+        // Selected session-এর enrolled students
+        $enrollmentQuery = StudentSession::query()
+            ->where('academic_session_id', $academicSession->id)
+            ->whereHas('student');
+
         if ($branchId !== null) {
-            $query->where('branch_id', $branchId);
+            $enrollmentQuery->where('branch_id', $branchId);
         }
 
-        $records = $query->get();
+        $enrollments = $enrollmentQuery->get();
+        $studentSessionIds = $enrollments->pluck('id');
 
-        $totalRecords = $records->count();
-        $present = $records->whereIn('status', ['present', 'late'])->count();
-        $absent = $records->where('status', 'absent')->count();
+        // এই মাসে যেসব তারিখে অন্তত একটি attendance record আছে
+        $attendanceQuery = StudentAttendance::query()
+            ->whereIn('student_session_id', $studentSessionIds)
+            ->whereYear('date', $year)
+            ->whereMonth('date', $monthNumber);
+
+        if ($branchId !== null) {
+            $attendanceQuery->where('branch_id', $branchId);
+        }
+
+        $records = $attendanceQuery->get();
+
+        $attendanceDates = $records
+            ->pluck('date')
+            ->map(fn ($date) => \Illuminate\Support\Carbon::parse($date)->toDateString())
+            ->unique()
+            ->values();
+
+        $totalStudents = $enrollments->count();
+
+        // Attendance নেওয়া প্রতিটি তারিখে সব enrolled student গণনা হবে
+        $totalRecords = $totalStudents * $attendanceDates->count();
+
+        $present = $records
+            ->whereIn('status', ['present', 'late'])
+            ->count();
+
         $leave = $records->where('status', 'leave')->count();
 
+        $explicitAbsent = $records->where('status', 'absent')->count();
+
+        // যে শিক্ষার্থীর attendance record নেই, তারাও absent
+        $missingRecords = max(0, $totalRecords - $records->count());
+
+        $absent = $explicitAbsent + $missingRecords;
+
         return response()->json([
+            'status' => true,
             'academic_session' => $academicSession,
             'month' => $month,
             'total_records' => $totalRecords,
             'present' => $present,
             'absent' => $absent,
             'leave' => $leave,
+
             'present_percentage' => $totalRecords > 0
                 ? round(($present / $totalRecords) * 100, 2)
                 : 0,
+
             'absent_percentage' => $totalRecords > 0
                 ? round(($absent / $totalRecords) * 100, 2)
                 : 0,
@@ -667,7 +692,9 @@ class StudentAttendanceController extends Controller
         }
 
         $year = (int) ($validated['year'] ?? now()->year);
+        $branchId = $this->currentBranchId();
 
+        // Selected academic session-এর enrolled students
         $enrollmentQuery = StudentSession::query()
             ->with([
                 'student',
@@ -680,8 +707,6 @@ class StudentAttendanceController extends Controller
             ])
             ->where('academic_session_id', $academicSession->id);
 
-        $branchId = $this->currentBranchId();
-
         if ($branchId !== null) {
             $enrollmentQuery->where('branch_id', $branchId);
         }
@@ -692,6 +717,7 @@ class StudentAttendanceController extends Controller
 
         $sessionIds = $enrollments->pluck('id');
 
+        // নির্বাচিত বছরে সংরক্ষিত Attendance
         $attendanceQuery = StudentAttendance::query()
             ->whereIn('student_session_id', $sessionIds)
             ->whereYear('date', $year);
@@ -700,50 +726,101 @@ class StudentAttendanceController extends Controller
             $attendanceQuery->where('branch_id', $branchId);
         }
 
-        $attendanceBySession = $attendanceQuery
+        $allRecords = $attendanceQuery
             ->orderBy('date')
-            ->get()
+            ->get();
+
+        // যে তারিখে অন্তত একজনের Attendance save হয়েছে
+        $attendanceDates = $allRecords
+            ->pluck('date')
+            ->map(fn ($date) => \Illuminate\Support\Carbon::parse($date)->toDateString())
+            ->unique()
+            ->sort()
+            ->values();
+
+        // প্রতিটি enrollment-এর record তারিখ অনুযায়ী সাজানো
+        $attendanceBySession = $allRecords
             ->groupBy('student_session_id');
 
         $students = $enrollments->map(function ($enrollment) use (
-            $attendanceBySession
+            $attendanceBySession,
+            $attendanceDates
         ) {
             $records = $attendanceBySession->get(
                 $enrollment->id,
                 collect()
             );
 
-            $present = $records->whereIn(
-                'status',
-                ['present', 'late']
-            )->count();
+            // প্রতিটি তারিখে একজন শিক্ষার্থীর সর্বোচ্চ একটি record ধরা হচ্ছে
+            $recordsByDate = $records->keyBy(
+                fn ($record) => \Illuminate\Support\Carbon::parse(
+                    $record->date
+                )->toDateString()
+            );
 
-            $absent = $records->where('status', 'absent')->count();
-            $leave = $records->where('status', 'leave')->count();
+            $completeRecords = collect();
+
+            foreach ($attendanceDates as $date) {
+                $record = $recordsByDate->get($date);
+
+                if ($record) {
+                    // Record থাকলে database-এর status-ই ব্যবহার হবে
+                    $completeRecords->push([
+                        'id' => $record->id,
+                        'date' => $date,
+                        'status' => strtolower($record->status),
+                        'remarks' => $record->remarks,
+                    ]);
+                } else {
+                    // ঐ তারিখে Attendance নেওয়া হয়েছে,
+                    // কিন্তু এই শিক্ষার্থীর record নেই: Absent
+                    $completeRecords->push([
+                        'id' => null,
+                        'date' => $date,
+                        'status' => 'absent',
+                        'remarks' => null,
+                    ]);
+                }
+            }
+
+            $present = $completeRecords
+                ->where('status', 'present')
+                ->count();
+
+            $late = $completeRecords
+                ->where('status', 'late')
+                ->count();
+
+            $absent = $completeRecords
+                ->where('status', 'absent')
+                ->count();
+
+            $leave = $completeRecords
+                ->where('status', 'leave')
+                ->count();
 
             $student = $this->formatStudentSession($enrollment);
 
             $student->setAttribute('present', $present);
+            $student->setAttribute('late', $late);
             $student->setAttribute('absent', $absent);
             $student->setAttribute('leave', $leave);
-            $student->setAttribute('total_records', $records->count());
+            $student->setAttribute(
+                'total_records',
+                $completeRecords->count()
+            );
 
+            // Modal-এর Monthly হিসাব এই তালিকা থেকেই হবে
             $student->setAttribute(
                 'attendance_records',
-                $records->map(function ($record) {
-                    return [
-                        'id' => $record->id,
-                        'date' => $record->date,
-                        'status' => $record->status,
-                        'remarks' => $record->remarks,
-                    ];
-                })->values()
+                $completeRecords->values()
             );
 
             return $student;
         })->values();
 
         return response()->json([
+            'status' => true,
             'academic_session' => $academicSession,
             'academic_session_id' => $academicSession->id,
             'year' => $year,

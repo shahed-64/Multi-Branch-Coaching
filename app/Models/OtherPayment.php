@@ -10,6 +10,7 @@ class OtherPayment extends Model
     protected $fillable = [
         'student_id',
         'student_session_id',
+        'payment_type',
         'item_name',
         'quantity',
         'price',

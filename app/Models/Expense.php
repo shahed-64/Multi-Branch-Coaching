@@ -19,6 +19,7 @@ class Expense extends Model
         'created_by',
         'branch_id',
         'academic_session_id',
+        'remarks',
     ];
 
     public function branch(): BelongsTo

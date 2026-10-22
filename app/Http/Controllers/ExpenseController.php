@@ -107,9 +107,44 @@ class ExpenseController extends Controller
     }
 
     /**
+ * GET /expenses/ledger
+ * Fetch paid expenses for the ledger date range.
+ */
+public function ledger(Request $request)
+{
+    $authorization = $this->authorizeExpenseAccess();
+
+    if ($authorization) {
+        return $authorization;
+    }
+
+    $validated = $request->validate([
+        'start_date' => 'required|date',
+        'end_date' => 'required|date|after_or_equal:start_date',
+    ]);
+
+    $expenses = $this->branchExpenseQuery()
+        ->with([
+            'branch:id,name',
+            'academicSession:id,name,branch_id,is_active',
+        ])
+        ->whereDate('payment_date', '>=', $validated['start_date'])
+        ->whereDate('payment_date', '<=', $validated['end_date'])
+        ->where('paid_amount', '>', 0)
+        ->orderBy('payment_date')
+        ->orderBy('id')
+        ->get();
+
+    return response()->json([
+        'status' => true,
+        'message' => 'Expense ledger fetched successfully.',
+        'expenses' => $expenses,
+    ]);
+}
+    /**
      * GET /expenses
      */
-    public function index()
+   public function index()
     {
         $authorization = $this->authorizeExpenseAccess();
 
@@ -118,6 +153,9 @@ class ExpenseController extends Controller
         }
 
         $expenses = $this->branchExpenseQuery()
+            ->whereHas('academicSession', function ($query) {
+                $query->where('is_active', true);
+            })
             ->with([
                 'branch:id,name',
                 'academicSession:id,name,branch_id,is_active',
@@ -155,6 +193,7 @@ class ExpenseController extends Controller
             'payment_date' => 'nullable|date',
             'academic_session_id' => 'required|integer|exists:academic_sessions,id',
             'branch_id' => 'nullable|integer|exists:branches,id',
+            'remarks' => 'nullable|string|max:2000',
         ]);
 
         $user = $this->staff();
@@ -220,6 +259,7 @@ class ExpenseController extends Controller
             'created_by' => $user->name ?? 'System Admin',
             'branch_id' => $branchId,
             'academic_session_id' => $request->academic_session_id,
+            'remarks' => $request->remarks,
         ]);
 
         $expense->load([
@@ -297,6 +337,7 @@ class ExpenseController extends Controller
             'payment_month' => 'required|date_format:Y-m',
             'payment_date' => 'nullable|date',
             'academic_session_id' => 'required|integer|exists:academic_sessions,id',
+            'remarks' => 'nullable|string|max:2000',
         ]);
 
         /*
@@ -328,6 +369,7 @@ class ExpenseController extends Controller
                 ?? $expense->payment_date
                 ?? now()->toDateString(),
             'academic_session_id' => $request->academic_session_id,
+            'remarks' => $request->remarks,
         ]);
 
         $expense->load([

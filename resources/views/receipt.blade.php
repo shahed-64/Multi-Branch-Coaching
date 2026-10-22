@@ -477,7 +477,7 @@
                                     Month
                                 </span>
 
-                                {{ $payment->month ?? 'N/A' }}
+                               {{ $payment->month ?? $payment->due_month ?? 'N/A' }}
 
                             </div>
 
@@ -546,105 +546,77 @@
 
 
             <tbody>
+    @php
+        $isStandaloneDuePayment = empty($payment->month)
+            && !empty($payment->due_month);
 
+        $hasPreviousDuePayment = !empty($payment->due_month)
+            && (float) ($payment->due_payment_amount ?? 0) > 0;
 
-                <!-- MONTHLY FEE -->
-                <tr>
+        $rowNumber = 1;
+    @endphp
 
-                    <td>
-                        1
-                    </td>
+    {{-- MONTHLY FEE --}}
+    @if(!$isStandaloneDuePayment)
+        <tr>
+            <td>{{ $rowNumber++ }}</td>
+            <td>
+                Monthly Coaching Fee — {{ $payment->month ?? 'N/A' }}
+            </td>
+            <td>
+                BDT {{ number_format((float) ($payment->amount ?? 0), 2) }}
+            </td>
+        </tr>
 
-                    <td>
-                        Monthly Coaching Fee
-                    </td>
+        {{-- CURRENT MONTH PAID AMOUNT --}}
+        <tr>
+            <td>{{ $rowNumber++ }}</td>
+            <td>
+                <strong>Paid Amount</strong>
+            </td>
+            <td>
+                <strong>
+                    BDT {{ number_format((float) ($payment->paid_amount ?? 0), 2) }}
+                </strong>
+            </td>
+        </tr>
+    @endif
 
-                    <td>
-                        BDT {{ number_format(
-                            $payment->amount ?? 0,
-                            2
-                        ) }}
-                    </td>
+    {{-- PREVIOUS MONTH DUE PAYMENT --}}
+    @if($hasPreviousDuePayment)
+        <tr>
+            <td>{{ $rowNumber++ }}</td>
+            <td>
+                Due Payment — {{ $payment->due_month }}
+            </td>
+            <td>
+                BDT {{ number_format((float) $payment->due_payment_amount, 2) }}
+            </td>
+        </tr>
+    @endif
 
-                </tr>
+    {{-- ADMISSION FEE --}}
+    @if((float) ($payment->admission_fee ?? 0) > 0)
+        <tr>
+            <td>{{ $rowNumber++ }}</td>
+            <td>Admission Fee</td>
+            <td>
+                BDT {{ number_format((float) $payment->admission_fee, 2) }}
+            </td>
+        </tr>
+    @endif
 
-
-                <!-- PAID AMOUNT -->
-                <tr>
-
-                    <td>
-                        2
-                    </td>
-
-                    <td>
-                        <strong>
-                            Paid Amount
-                        </strong>
-                    </td>
-
-                    <td>
-                        <strong>
-                            BDT {{ number_format(
-                                $payment->paid_amount ?? 0,
-                                2
-                            ) }}
-                        </strong>
-                    </td>
-
-                </tr>
-
-
-                <!-- ADMISSION FEE -->
-                @if($payment->admission_fee)
-
-                    <tr>
-
-                        <td>
-                            3
-                        </td>
-
-                        <td>
-                            Admission Fee
-                        </td>
-
-                        <td>
-                            BDT {{ number_format(
-                                $payment->admission_fee,
-                                2
-                            ) }}
-                        </td>
-
-                    </tr>
-
-                @endif
-
-
-                <!-- EXAM FEE -->
-                @if($payment->exam_fee)
-
-                    <tr>
-
-                        <td>
-                            {{ $payment->admission_fee ? 3 : 2 }}
-                        </td>
-
-                        <td>
-                            Exam Fee
-                        </td>
-
-                        <td>
-                            BDT {{ number_format(
-                                $payment->exam_fee,
-                                2
-                            ) }}
-                        </td>
-
-                    </tr>
-
-                @endif
-
-
-            </tbody>
+    {{-- EXAM FEE --}}
+    @if((float) ($payment->exam_fee ?? 0) > 0)
+        <tr>
+            <td>{{ $rowNumber++ }}</td>
+            <td>Exam Fee</td>
+            <td>
+                BDT {{ number_format((float) $payment->exam_fee, 2) }}
+            </td>
+        </tr>
+    @endif
+</tbody>
 
         </table>
 

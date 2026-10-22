@@ -475,256 +475,239 @@ class TeachersAttendanceController extends Controller
      * Teacher yearly summary report.
      * --------------------------------------------------------------------------
      */
-    public function teacherSummaryReport(
-        Request $request
-    ) {
-        $year = $request->input(
-            'year',
-            date('Y')
-        );
+
+    public function teacherSummaryReport(Request $request)
+    {
+        $year = $request->input('year', date('Y'));
 
         try {
             $teachers = $this->teacherQuery()
                 ->with('shifts')
                 ->get();
 
-            $summary = $teachers->map(
-                function ($teacher) use ($year) {
+            // Current branch context-এর ওই বছরের attendance records
+            $yearAttendances = $this->attendanceQuery()
+                ->whereYear('date', $year)
+                ->get();
 
-                    $attendanceQuery =
-                        TeachersAttendance::where(
-                            'teacher_id',
-                            $teacher->id
-                        )
-                            ->whereYear(
-                                'date',
-                                $year
-                            );
+            // যেসব তারিখে অন্তত একটি কার্যকর attendance record আছে
+            $attendanceDays = $yearAttendances
+                ->reject(function ($attendance) {
+                    return in_array(
+                        strtolower(trim((string) $attendance->status)),
+                        ['holiday', 'off day', 'off_day', 'offday'],
+                        true
+                    );
+                })
+                ->map(function ($attendance) {
+                    return Carbon::parse($attendance->date)->toDateString();
+                })
+                ->unique()
+                ->values();
 
-                    /**
-                     * Selected branch হলে attendance-ও
-                     * selected branch-এর মধ্যেই থাকবে।
-                     */
-                    $currentBranchId =
-                        $this->currentBranchId();
+            $summary = $teachers->map(function ($teacher) use (
+                $yearAttendances,
+                $attendanceDays
+            ) {
+                $attendances = $yearAttendances->where(
+                    'teacher_id',
+                    $teacher->id
+                );
 
-                    if ($currentBranchId !== null) {
-                        $attendanceQuery->where(
-                            'branch_id',
-                            $currentBranchId
+                // এই শিক্ষকের কার্যকর attendance record থাকা তারিখগুলো
+                $teacherAttendanceDays = $attendances
+                    ->reject(function ($attendance) {
+                        return in_array(
+                            strtolower(trim((string) $attendance->status)),
+                            ['holiday', 'off day', 'off_day', 'offday'],
+                            true
                         );
-                    }
+                    })
+                    ->map(function ($attendance) {
+                        return Carbon::parse($attendance->date)->toDateString();
+                    })
+                    ->unique()
+                    ->values();
 
-                    $attendances =
-                        $attendanceQuery->get();
+                // অন্যদের attendance থাকা তারিখে এই শিক্ষকের record না থাকলে absent
+                $missingAbsentDays = $attendanceDays
+                    ->diff($teacherAttendanceDays)
+                    ->count();
 
-                    $shiftNames =
-                        $teacher->shifts
-                            ->pluck('name')
-                            ->implode(', ');
+                $shiftNames = $teacher->shifts
+                    ->pluck('name')
+                    ->implode(', ');
 
-                    return [
-                        'id' =>
-                            $teacher->id,
+                $explicitAbsent = $attendances
+                    ->where('status', 'Absent')
+                    ->count();
 
-                        'name' =>
-                            $teacher->full_name
-                            ?? $teacher->name
-                            ?? 'N/A',
+                return [
+                    'id' => $teacher->id,
 
-                        'code' =>
-                            $teacher->teacher_id
-                            ?? $teacher->code
-                            ?? 'N/A',
+                    'name' => $teacher->full_name
+                        ?? $teacher->name
+                        ?? 'N/A',
 
-                        'shift' =>
-                            !empty($shiftNames)
-                                ? $shiftNames
-                                : 'General',
+                    'code' => $teacher->teacher_id
+                        ?? $teacher->code
+                        ?? 'N/A',
 
-                        'total_present' =>
-                            $attendances
-                                ->where(
-                                    'status',
-                                    'Present'
-                                )
-                                ->count(),
+                    'shift' => !empty($shiftNames)
+                        ? $shiftNames
+                        : 'General',
 
-                        'total_late' =>
-                            $attendances
-                                ->where(
-                                    'status',
-                                    'Late'
-                                )
-                                ->count(),
+                    'total_present' => $attendances
+                        ->where('status', 'Present')
+                        ->count(),
 
-                        'total_absent' =>
-                            $attendances
-                                ->where(
-                                    'status',
-                                    'Absent'
-                                )
-                                ->count(),
+                    'total_late' => $attendances
+                        ->where('status', 'Late')
+                        ->count(),
 
-                        'total_leave' =>
-                            $attendances
-                                ->where(
-                                    'status',
-                                    'Leave'
-                                )
-                                ->count(),
+                    'total_absent' => $explicitAbsent + $missingAbsentDays,
 
-                        'total_off_day' =>
-                            $attendances
-                                ->where(
-                                    'status',
-                                    'Off Day'
-                                )
-                                ->count(),
-                    ];
-                }
-            );
+                    'total_leave' => $attendances
+                        ->where('status', 'Leave')
+                        ->count(),
 
-            return response()->json(
-                $summary,
-                200
-            );
+                    'total_off_day' => $attendances
+                        ->where('status', 'Off Day')
+                        ->count(),
+                ];
+            });
+
+            return response()->json($summary, 200);
 
         } catch (\Exception $e) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Failed to fetch summary report.',
-                'error' =>
-                    $e->getMessage(),
+                'message' => 'Failed to fetch summary report.',
+                'error' => $e->getMessage(),
             ], 500);
         }
     }
+
 
     /**
      * --------------------------------------------------------------------------
      * Single teacher January - December yearly report.
      * --------------------------------------------------------------------------
      */
-    public function singleTeacherYearlyReport(
-        $id,
-        Request $request
-    ) {
-        $year = $request->input(
-            'year',
-            date('Y')
-        );
+
+
+    public function singleTeacherYearlyReport($id, Request $request)
+    {
+        $year = $request->input('year', date('Y'));
 
         try {
-            /**
-             * Teacher must belong to current branch context.
-             */
-            $teacher =
-                $this->teacherQuery()
-                    ->findOrFail($id);
+            // Teacher current branch context-এর অন্তর্ভুক্ত হতে হবে
+            $teacher = $this->teacherQuery()->findOrFail($id);
+
+            // এই শিক্ষকের নির্বাচিত বছরের attendance
+            $yearAttendances = $this->attendanceQuery()
+                ->where('teacher_id', $id)
+                ->whereYear('date', $year)
+                ->get();
+
+            // Branch context-এর সব শিক্ষকের কার্যকর attendance dates
+            $attendanceDays = $this->attendanceQuery()
+                ->whereYear('date', $year)
+                ->get()
+                ->reject(function ($attendance) {
+                    return in_array(
+                        strtolower(trim((string) $attendance->status)),
+                        ['holiday', 'off day', 'off_day', 'offday'],
+                        true
+                    );
+                })
+                ->map(function ($attendance) {
+                    return Carbon::parse($attendance->date)->toDateString();
+                })
+                ->unique()
+                ->values();
 
             $monthlyReports = [];
 
-            for (
-                $month = 1;
-                $month <= 12;
-                $month++
-            ) {
+            for ($month = 1; $month <= 12; $month++) {
                 $monthName = Carbon::create()
                     ->month($month)
                     ->format('F');
 
-                $attendances =
-                    TeachersAttendance::where(
-                        'teacher_id',
-                        $id
-                    )
-                        ->where(
-                            'branch_id',
-                            $teacher->branch_id
-                        )
-                        ->whereYear(
-                            'date',
-                            $year
-                        )
-                        ->whereMonth(
-                            'date',
-                            $month
-                        )
-                        ->get();
+                $attendances = $yearAttendances->filter(function ($attendance) use ($month) {
+                    return Carbon::parse($attendance->date)->month === $month;
+                });
+
+                // এই মাসে attendance record থাকা কার্যকর তারিখ
+                $monthAttendanceDays = $attendanceDays->filter(function ($date) use ($month) {
+                    return Carbon::parse($date)->month === $month;
+                });
+
+                $teacherAttendanceDays = $attendances
+                    ->reject(function ($attendance) {
+                        return in_array(
+                            strtolower(trim((string) $attendance->status)),
+                            ['holiday', 'off day', 'off_day', 'offday'],
+                            true
+                        );
+                    })
+                    ->map(function ($attendance) {
+                        return Carbon::parse($attendance->date)->toDateString();
+                    })
+                    ->unique()
+                    ->values();
+
+                // Record নেই এমন কার্যকর দিনে absent গণনা
+                $missingAbsentDays = $monthAttendanceDays
+                    ->diff($teacherAttendanceDays)
+                    ->count();
 
                 $monthlyReports[] = [
-                    'month_number' =>
-                        $month,
+                    'month_number' => $month,
 
-                    'month_name' =>
-                        $monthName,
+                    'month_name' => $monthName,
 
-                    'present' =>
-                        $attendances
-                            ->where(
-                                'status',
-                                'Present'
-                            )
-                            ->count(),
+                    'present' => $attendances
+                        ->where('status', 'Present')
+                        ->count(),
 
-                    'late' =>
-                        $attendances
-                            ->where(
-                                'status',
-                                'Late'
-                            )
-                            ->count(),
+                    'late' => $attendances
+                        ->where('status', 'Late')
+                        ->count(),
 
-                    'absent' =>
-                        $attendances
-                            ->where(
-                                'status',
-                                'Absent'
-                            )
-                            ->count(),
+                    'absent' => $attendances
+                        ->where('status', 'Absent')
+                        ->count() + $missingAbsentDays,
 
-                    'leave' =>
-                        $attendances
-                            ->where(
-                                'status',
-                                'Leave'
-                            )
-                            ->count(),
+                    'leave' => $attendances
+                        ->where('status', 'Leave')
+                        ->count(),
 
-                    'off_day' =>
-                        $attendances
-                            ->where(
-                                'status',
-                                'Off Day'
-                            )
-                            ->count(),
+                    'off_day' => $attendances
+                        ->where('status', 'Off Day')
+                        ->count(),
 
-                    'total_days' =>
-                        $attendances->count(),
+                    'total_days' => $attendances->count()
+                        + $missingAbsentDays,
                 ];
             }
 
             return response()->json([
                 'status' => true,
-                'teacher' =>
-                    $teacher,
-                'year' =>
-                    $year,
-                'monthly_reports' =>
-                    $monthlyReports,
+                'teacher' => $teacher,
+                'year' => $year,
+                'monthly_reports' => $monthlyReports,
             ], 200);
 
         } catch (\Exception $e) {
             return response()->json([
                 'status' => false,
-                'message' =>
-                    'Failed to fetch yearly report.',
-                'error' =>
-                    $e->getMessage(),
+                'message' => 'Failed to fetch yearly report.',
+                'error' => $e->getMessage(),
             ], 500);
         }
     }
+
 
     /**
      * --------------------------------------------------------------------------

@@ -64,47 +64,87 @@ class ShiftController extends Controller
     /**
      * সব শিফটের তালিকা
      */
-    public function index(Request $request)
-    {
-        if ($response = $this->authorizeAccess($request)) {
-            return $response;
+
+/**
+ * সব শিফটের তালিকা
+ * Academic Session অনুযায়ী Shift filter
+ */
+public function index(Request $request)
+{
+    if ($response = $this->authorizeAccess($request)) {
+        return $response;
+    }
+
+    try {
+        $query = Shift::with([
+            'teachers',
+            'branch',
+        ]);
+
+        $currentBranchId = $this->currentBranchId();
+
+        // Branch filter
+        if ($currentBranchId !== null) {
+            $query->where('branch_id', $currentBranchId);
         }
 
-        try {
-            $query = Shift::with([
-                'teachers',
-                'branch',
+        // Academic Session filter
+        if ($request->filled('academic_session_id')) {
+            $request->validate([
+                'academic_session_id' => [
+                    'required',
+                    'integer',
+                    'exists:academic_sessions,id',
+                ],
             ]);
 
-            $currentBranchId = $this->currentBranchId();
+            $sessionQuery = \App\Models\AcademicSession::query()
+                ->where('id', $request->integer('academic_session_id'));
 
-            // Selected Branch হলে শুধু সেই branch
-            // All Branches হলে কোনো filter নয়
             if ($currentBranchId !== null) {
-                $query->where(
-                    'branch_id',
-                    $currentBranchId
-                );
+                $sessionQuery->where('branch_id', $currentBranchId);
             }
 
-            $shifts = $query
-                ->latest()
-                ->get();
+            $academicSession = $sessionQuery->first();
 
-            return response()->json([
-                'status' => true,
-                'message' => 'Shifts fetched successfully.',
-                'data' => $shifts,
-            ], 200);
+            if (!$academicSession) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Selected academic session is not accessible.',
+                ], 403);
+            }
 
-        } catch (\Exception $e) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Failed to fetch shifts.',
-                'error' => $e->getMessage(),
-            ], 500);
+            // শুধু নির্বাচিত Session-এ ব্যবহৃত Shift
+            $query->whereIn(
+                'id',
+                \App\Models\StudentSession::query()
+                    ->where('academic_session_id', $academicSession->id)
+                    ->where('branch_id', $academicSession->branch_id)
+                    ->whereNotNull('shift_id')
+                    ->select('shift_id')
+                    ->distinct()
+            );
         }
+
+        $shifts = $query
+            ->latest()
+            ->get();
+
+        return response()->json([
+            'status' => true,
+            'message' => 'Shifts fetched successfully.',
+            'data' => $shifts,
+        ], 200);
+
+    } catch (\Exception $e) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Failed to fetch shifts.',
+            'error' => $e->getMessage(),
+        ], 500);
     }
+}
+
 
     /**
      * নতুন শিফট তৈরি

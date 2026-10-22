@@ -14,7 +14,8 @@ use App\Models\Holiday;
 use App\Models\Result;
 use App\Models\Examination;
 use App\Services\BranchContext;
-
+use App\Models\AcademicSession;
+use App\Models\StudentSession;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
@@ -230,14 +231,11 @@ class StafftController extends Controller
             'user_name' => 'required|string',
             'skill' => 'required|string',
             'role' => [
-                'required',
-                Rule::in([
-                    'Admin',
-                    'Manager',
-                    'Branch Manager',
-                    'Branch Accountant',
-                ]),
-            ],
+            'required',
+            'string',
+            'max:100',
+            'not_in:Others',
+        ],
             'shift_id' => 'required|exists:shifts,id',
             'branch_id' => 'nullable|exists:branches,id',
             'email' => 'required|email|unique:staff,email',
@@ -482,14 +480,11 @@ class StafftController extends Controller
             'skill' =>
                 'required|string',
             'role' => [
-                'required',
-                Rule::in([
-                    'Admin',
-                    'Manager',
-                    'Branch Manager',
-                    'Branch Accountant',
-                ]),
-            ],
+            'required',
+            'string',
+            'max:100',
+            'not_in:Others',
+        ],
             'shift_id' =>
                 'required|exists:shifts,id',
             'branch_id' =>
@@ -717,32 +712,45 @@ class StafftController extends Controller
      * LOGIN
      * --------------------------------------------------------------------------
      */
-    public function login(Request $request)
-    {
-        $request->validate([
-            'email' =>
-                'required|email',
-            'password' =>
-                'required',
-        ]);
+public function login(Request $request)
+{
+    $request->validate([
+        'email' => 'required|email',
+        'password' => 'required',
+    ]);
 
-        $staff = Staff::where(
-            'email',
-            $request->email
-        )->first();
+    $staff = Staff::where(
+        'email',
+        $request->email
+    )->first();
 
-        if (
-            !$staff
-            || !Hash::check(
-                $request->password,
-                $staff->password
-            )
-        ) {
-            return response()->json([
-                'status' => false,
-                'message' =>
-                    'Invalid credentials',
-            ], 401);
+    if (
+        !$staff ||
+        !Hash::check($request->password, $staff->password)
+    ) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Invalid credentials',
+        ], 401);
+    }
+
+    // Roles allowed to login
+    $allowedLoginRoles = [
+        'Manager',
+        'Branch Manager',
+        'Admin',
+        'Branch Admin',
+        'Accountant',
+        'Branch Accountant',
+        'Result Entry',
+    ];
+
+    // Block custom roles such as Guard and Swiper
+    if (!in_array($staff->role, $allowedLoginRoles, true)) {
+        return response()->json([
+            'status' => false,
+            'message' => 'This role is not allowed to login.',
+        ], 403);
         }
 
         $token = $staff
@@ -751,15 +759,12 @@ class StafftController extends Controller
 
         return response()->json([
             'status' => true,
-            'message' =>
-                'Login successful',
-            'staff' =>
-                $staff->load([
-                    'shift',
-                    'branch',
-                ]),
-            'token' =>
-                $token,
+            'message' => 'Login successful',
+            'staff' => $staff->load([
+                'shift',
+                'branch',
+            ]),
+            'token' => $token,
         ]);
     }
 
@@ -768,786 +773,685 @@ class StafftController extends Controller
      * DASHBOARD
      * --------------------------------------------------------------------------
      */
-    public function dashboard(Request $request)
-    {
-        $authUser = $this->authUser($request);
 
-        if (!$authUser) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Unauthenticated.',
-            ], 401);
+public function dashboard(Request $request)
+{
+    $authUser = $this->authUser($request);
+
+    if (!$authUser) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Unauthenticated.',
+        ], 401);
+    }
+
+    if (!in_array($authUser->role, [
+        'Manager',
+        'Branch Manager',
+        'Admin',
+        'Branch Admin',
+    ])) {
+        return $this->forbidden(
+            'You are not authorized to access the dashboard.'
+        );
+    }
+
+    if (
+        $authUser->role !== 'Manager'
+        && !$authUser->branch_id
+    ) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Your account is not assigned to any branch.',
+        ], 403);
+    }
+
+    $request->validate([
+        'academic_session_id' => [
+            'nullable',
+            'integer',
+            'exists:academic_sessions,id',
+        ],
+    ]);
+
+    $selectedBranchId = null;
+
+    if ($authUser->role === 'Manager') {
+        $headerBranchId = $request->header('X-Branch-Id');
+
+        if ($headerBranchId !== null && $headerBranchId !== '') {
+            $selectedBranch = Branch::find($headerBranchId);
+
+            if (!$selectedBranch) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Selected branch not found.',
+                ], 404);
+            }
+
+            $selectedBranchId = (int) $selectedBranch->id;
         }
+    } else {
+        $selectedBranchId = (int) $authUser->branch_id;
+    }
 
-        if (!in_array($authUser->role, [
-            'Manager',
-            'Branch Manager',
-            'Admin',
-            'Branch Admin',
-        ])) {
-            return $this->forbidden(
-                'You are not authorized to access the dashboard.'
-            );
-        }
+    /*
+    |--------------------------------------------------------------------------
+    | Resolve Academic Session
+    |--------------------------------------------------------------------------
+    */
+    $sessionQuery = AcademicSession::query();
 
-        if (
-            $authUser->role !== 'Manager'
-            && !$authUser->branch_id
-        ) {
+    if ($selectedBranchId !== null) {
+        $sessionQuery->where('branch_id', $selectedBranchId);
+    }
+
+    if ($request->filled('academic_session_id')) {
+        $academicSession = (clone $sessionQuery)
+            ->where('id', $request->integer('academic_session_id'))
+            ->first();
+
+        if (!$academicSession) {
             return response()->json([
                 'status' => false,
                 'message' =>
-                    'Your account is not assigned to any branch.',
+                    'The selected academic session does not belong to your selected branch.',
             ], 403);
         }
-
-        $staffQuery = Staff::query();
-        $studentQuery = Student::query();
-        $teacherQuery = Teacher::query();
-        $branchQuery = Branch::query();
-
-        $selectedBranchId = null;
-
-        /**
-         * --------------------------------------------------------------------------
-         * MANAGER
-         * --------------------------------------------------------------------------
-         */
-        if ($authUser->role === 'Manager') {
-            $selectedBranchId =
-                $request->header('X-Branch-Id');
-
-            if (
-                $selectedBranchId !== null
-                && $selectedBranchId !== ''
-            ) {
-                $selectedBranch = Branch::find($selectedBranchId);
-
-                if (!$selectedBranch) {
-                    return response()->json([
-                        'status' => false,
-                        'message' =>
-                            'Selected branch not found.',
-                    ], 404);
-                }
-
-                $staffQuery->where(
-                    'branch_id',
-                    $selectedBranch->id
-                );
-
-                $studentQuery->where(
-                    'branch_id',
-                    $selectedBranch->id
-                );
-
-                $teacherQuery->where(
-                    'branch_id',
-                    $selectedBranch->id
-                );
-            }
-        }
-
-        /**
-         * --------------------------------------------------------------------------
-         * NON-MANAGER
-         * --------------------------------------------------------------------------
-         */
-        if ($authUser->role !== 'Manager') {
-            $staffQuery->where(
-                'branch_id',
-                $authUser->branch_id
-            );
-
-            $studentQuery->where(
-                'branch_id',
-                $authUser->branch_id
-            );
-
-            $teacherQuery->where(
-                'branch_id',
-                $authUser->branch_id
-            );
-        }
-
-        /**
-         * --------------------------------------------------------------------------
-         * RECENT STAFF
-         * --------------------------------------------------------------------------
-         */
-        $recentStaffQuery = Staff::with([
-            'shift',
-            'branch',
-        ]);
-
-        if ($authUser->role === 'Manager') {
-            if (
-                $selectedBranchId !== null
-                && $selectedBranchId !== ''
-            ) {
-                $recentStaffQuery->where(
-                    'branch_id',
-                    $selectedBranchId
-                );
-            }
-        } else {
-            $recentStaffQuery->where(
-                'branch_id',
-                $authUser->branch_id
-            );
-        }
-
-        $recentStaff = $recentStaffQuery
-            ->latest()
-            ->take(5)
-            ->get();
-
-        /**
-         * --------------------------------------------------------------------------
-         * TOTAL BRANCHES
-         * --------------------------------------------------------------------------
-         */
-        if ($authUser->role !== 'Manager') {
-            $totalBranches = 1;
-        } elseif (
-            $selectedBranchId !== null
-            && $selectedBranchId !== ''
-        ) {
-            $totalBranches = 1;
-        } else {
-            $totalBranches =
-                $branchQuery->count();
-        }
-
-        /**
-         * --------------------------------------------------------------------------
-         * NOTIFICATION BRANCH FILTER
-         * --------------------------------------------------------------------------
-         */
-        $notificationBranchId = null;
-
-        if ($authUser->role === 'Manager') {
-            if (
-                $selectedBranchId !== null
-                && $selectedBranchId !== ''
-            ) {
-                $notificationBranchId =
-                    $selectedBranchId;
-            }
-        } else {
-            $notificationBranchId =
-                $authUser->branch_id;
-        }
-
-        /**
-         * --------------------------------------------------------------------------
-         * NOTIFICATIONS
-         * --------------------------------------------------------------------------
-         */
-        $notifications = collect();
-
-        /**
-         * --------------------------------------------------------------------------
-         * 1. NEW ADMISSION
-         * --------------------------------------------------------------------------
-         */
-        $newAdmissionQuery = Student::with([
-            'classInfo',
-            'branch',
-        ])
-            ->whereNotNull('admission_date');
-
-        if ($notificationBranchId !== null) {
-            $newAdmissionQuery->where(
-                'branch_id',
-                $notificationBranchId
-            );
-        }
-
-        $newAdmissions = $newAdmissionQuery
-            ->orderByDesc('admission_date')
+    } else {
+        $academicSession = (clone $sessionQuery)
+            ->where('is_active', true)
             ->orderByDesc('id')
-            ->take(5)
-            ->get();
+            ->first();
+    }
 
-        foreach ($newAdmissions as $student) {
-            $admissionDate = $student->admission_date
-                ? \Carbon\Carbon::parse($student->admission_date)
-                : null;
-
-            if (!$admissionDate) {
-                continue;
-            }
-
-            /**
-             * Class Name
-             */
-            $className = optional($student->classInfo)->name
-                ?? optional($student->classInfo)->class_name
-                ?? 'a class';
-
-            /**
-             * Relative Time
-             */
-            if ($admissionDate->isToday()) {
-                $notificationTime = 'Today';
-            } elseif ($admissionDate->isYesterday()) {
-                $notificationTime = 'Yesterday';
-            } else {
-                $notificationTime =
-                    $admissionDate->diffForHumans();
-            }
-
-            $notifications->push([
-                'title' => 'New Admission',
-                'text' =>
-                    $student->full_name .
-                    ' has been admitted to ' .
-                    $className .
-                    '.',
-                'time' => $notificationTime,
-                'type' => 'blue',
-                'icon' => '🎓',
-                'date' => $admissionDate->toDateString(),
-                'student_id' => $student->id,
-                'branch_id' => $student->branch_id,
-            ]);
-        }
-
-        /**
-         * --------------------------------------------------------------------------
-         * 2. RECENT PUBLISHED RESULT
-         * --------------------------------------------------------------------------
-         *
-         * Result table-এ বর্তমানে published_at / is_published নেই।
-         * তাই result-এর created_at-কে published time হিসেবে ব্যবহার করছি।
-         *
-         * --------------------------------------------------------------------------
-         */
-        $recentResultQuery = Result::with([
-            'student.classInfo',
-            'student.branch',
-        ]);
-
-        if ($notificationBranchId !== null) {
-            $recentResultQuery->where(
-                'branch_id',
-                $notificationBranchId
-            );
-        }
-
-        $recentResults = $recentResultQuery
-            ->orderByDesc('created_at')
-            ->orderByDesc('id')
-            ->take(5)
-            ->get();
-
-        foreach ($recentResults as $result) {
-            if (!$result->student) {
-                continue;
-            }
-
-            $resultDate = $result->created_at
-                ? \Carbon\Carbon::parse($result->created_at)
-                : null;
-
-            if (!$resultDate) {
-                continue;
-            }
-
-            /**
-             * Student Name
-             */
-            $studentName =
-                $result->student->full_name;
-
-            /**
-             * Class Name
-             */
-            $className =
-                optional($result->student->classInfo)->name
-                ?? optional($result->student->classInfo)->class_name
-                ?? 'Class';
-
-            /**
-             * Examination Type
-             */
-            $examType =
-                $result->exam_type ?: 'Examination';
-
-            /**
-             * Relative Time
-             */
-            if ($resultDate->isToday()) {
-                $notificationTime = 'Today';
-            } elseif ($resultDate->isYesterday()) {
-                $notificationTime = 'Yesterday';
-            } else {
-                $notificationTime =
-                    $resultDate->diffForHumans();
-            }
-
-            $notifications->push([
-                'title' => 'Recent Published Result',
-                'text' =>
-                    $studentName .
-                    "'s " .
-                    $className .
-                    ' ' .
-                    $examType .
-                    ' result has been published.',
-                'time' => $notificationTime,
-                'type' => 'green',
-                'icon' => '🏆',
-                'date' => $resultDate->toDateString(),
-                'student_id' =>
-                    $result->student_id,
-                'result_id' =>
-                    $result->id,
-                'branch_id' =>
-                    $result->branch_id,
-            ]);
-        }
-
-        /**
-         * --------------------------------------------------------------------------
-         * 3. EXAMINATION
-         * --------------------------------------------------------------------------
-         *
-         * Current Examination table-এ exam_date নেই।
-         * তাই এখানে false "Tomorrow" / "Today" তৈরি করছি না।
-         * Existing examination data থেকেই notification তৈরি হবে।
-         *
-         * --------------------------------------------------------------------------
-         */
-        $examinationQuery = Examination::query();
-
-        if ($notificationBranchId !== null) {
-            $examinationQuery->where(
-                'branch_id',
-                $notificationBranchId
-            );
-        }
-
-        $examinations = $examinationQuery
-            ->orderByDesc('created_at')
-            ->orderByDesc('id')
-            ->take(5)
-            ->get();
-
-        foreach ($examinations as $examination) {
-            $examDate = $examination->created_at
-                ? \Carbon\Carbon::parse($examination->created_at)
-                : null;
-
-            if (!$examDate) {
-                continue;
-            }
-
-            /**
-             * Examination Type
-             */
-            $examType =
-                $examination->examination_type
-                ?: 'Examination';
-
-            /**
-             * Examination Year
-             */
-            $examYear =
-                $examination->examination_year
-                ?: '';
-
-            /**
-             * Notification Time
-             */
-            if ($examDate->isToday()) {
-                $notificationTime = 'Today';
-            } elseif ($examDate->isYesterday()) {
-                $notificationTime = 'Yesterday';
-            } else {
-                $notificationTime =
-                    $examDate->diffForHumans();
-            }
-
-            $notifications->push([
-                'title' => 'Upcoming Examination',
-                'text' =>
-                    $examType .
-                    ' examination ' .
-                    ($examYear
-                        ? 'for ' . $examYear . ' '
-                        : '') .
-                    'has been scheduled.',
-                'time' => $notificationTime,
-                'type' => 'orange',
-                'icon' => '📝',
-                'date' => $examDate->toDateString(),
-                'examination_id' =>
-                    $examination->id,
-                'branch_id' =>
-                    $examination->branch_id,
-            ]);
-        }
-
-        /**
-         * --------------------------------------------------------------------------
-         * SORT NOTIFICATIONS
-         * --------------------------------------------------------------------------
-         *
-         * সবচেয়ে recent activity আগে দেখানো হবে।
-         *
-         * --------------------------------------------------------------------------
-         */
-        $notifications = $notifications
-            ->sortByDesc(function ($notification) {
-                return $notification['date'] ?? '';
-            })
-            ->values()
-            ->take(5);
-
-        /**
-         * --------------------------------------------------------------------------
-         * RESPONSE
-         * --------------------------------------------------------------------------
-         */
+    if (!$academicSession) {
         return response()->json([
-            'status' => true,
-            'total_staff' =>
-                $staffQuery->count(),
-            'total_students' =>
-                $studentQuery->count(),
-            'total_teachers' =>
-                $teacherQuery->count(),
-            'total_branches' =>
-                $totalBranches,
-            'recent_staff' =>
-                $recentStaff,
-            'notifications' =>
-                $notifications,
-            'user' => [
-                'id' =>
-                    $authUser->id,
-                'name' =>
-                    $authUser->name,
-                'role' =>
-                    $authUser->role,
-                'branch_id' =>
-                    $authUser->branch_id,
-                'designation' =>
-                    $authUser->skill
-                    ?? $authUser->role,
-                'image' =>
-                    $authUser->image
-                        ? asset(
-                            'storage/' .
-                            $authUser->image
-                        )
-                        : null,
-            ],
+            'status' => false,
+            'message' =>
+                'No active academic session was found. Please select an academic session.',
+        ], 422);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Session Branch
+    |--------------------------------------------------------------------------
+    | A session belongs to a specific branch.
+    | Use that branch to prevent mixing different branches' student data.
+    */
+    $selectedBranchId = (int) $academicSession->branch_id;
+
+    /*
+    |--------------------------------------------------------------------------
+    | Dashboard Queries
+    |--------------------------------------------------------------------------
+    */
+   /*
+    |--------------------------------------------------------------------------
+    | Dashboard Staff & Teacher Queries
+    |--------------------------------------------------------------------------
+    */
+    $staffQuery = Staff::query();
+    $teacherQuery = Teacher::query();
+
+    if ($selectedBranchId !== null) {
+        // Selected branch staff
+        $staffQuery->where('branch_id', $selectedBranchId);
+
+        // Selected branch teachers
+        $teacherQuery->where('branch_id', $selectedBranchId);
+    }
+
+/*
+|--------------------------------------------------------------------------
+| Filter Staff by Record Creation Date
+|--------------------------------------------------------------------------
+| Staff table has no join_date column.
+| Therefore, created_at is used as an approximate date.
+|--------------------------------------------------------------------------
+*/
+$staffQuery->whereDate(
+    'created_at',
+    '<=',
+    $academicSession->end_date
+);
+
+/*
+|--------------------------------------------------------------------------
+| Filter Teachers by Joining Date
+|--------------------------------------------------------------------------
+*/
+$teacherQuery->whereDate(
+    'join_date',
+    '<=',
+    $academicSession->end_date
+);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Students Registered in Selected Session
+    |--------------------------------------------------------------------------
+    */
+    $studentSessionQuery = StudentSession::query()
+        ->where('academic_session_id', $academicSession->id)
+        ->where('branch_id', $selectedBranchId);
+
+    $totalStudents = $studentSessionQuery->count();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Recent Staff
+    |--------------------------------------------------------------------------
+    */
+    $recentStaff = Staff::with([
+        'shift',
+        'branch',
+    ])
+        ->where('branch_id', $selectedBranchId)
+        ->latest()
+        ->take(5)
+        ->get();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Total Branches
+    |--------------------------------------------------------------------------
+    */
+    $totalBranches = $authUser->role === 'Manager'
+        ? Branch::count()
+        : 1;
+
+    /*
+    |--------------------------------------------------------------------------
+    | Notifications: New Admissions
+    |--------------------------------------------------------------------------
+    */
+    $sessionStudentIds = StudentSession::query()
+        ->where('academic_session_id', $academicSession->id)
+        ->where('branch_id', $selectedBranchId)
+        ->select('student_id');
+
+    $notifications = collect();
+
+    $newAdmissions = Student::with([
+        'classInfo',
+        'branch',
+    ])
+        ->where('branch_id', $selectedBranchId)
+        ->whereNotNull('admission_date')
+        ->whereIn('id', $sessionStudentIds)
+        ->orderByDesc('admission_date')
+        ->orderByDesc('id')
+        ->take(5)
+        ->get();
+
+    foreach ($newAdmissions as $student) {
+        if (!$student->admission_date) {
+            continue;
+        }
+
+        $admissionDate = \Carbon\Carbon::parse(
+            $student->admission_date
+        );
+
+        $className = optional($student->classInfo)->name
+            ?? optional($student->classInfo)->class_name
+            ?? 'a class';
+
+        $notificationTime = $admissionDate->isToday()
+            ? 'Today'
+            : ($admissionDate->isYesterday()
+                ? 'Yesterday'
+                : $admissionDate->diffForHumans());
+
+        $notifications->push([
+            'title' => 'New Admission',
+            'text' => $student->full_name
+                . ' has been admitted to '
+                . $className . '.',
+            'time' => $notificationTime,
+            'type' => 'blue',
+            'icon' => '🎓',
+            'date' => $admissionDate->toDateString(),
+            'student_id' => $student->id,
+            'branch_id' => $student->branch_id,
         ]);
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Notifications: Results in Selected Session
+    |--------------------------------------------------------------------------
+    */
+    $recentResults = Result::with([
+        'student.classInfo',
+        'student.branch',
+    ])
+        ->where('branch_id', $selectedBranchId)
+        ->where('student_session_id', function ($query) use ($academicSession) {
+            $query->select('id')
+                ->from('student_sessions')
+                ->where('academic_session_id', $academicSession->id)
+                ->where('branch_id', $academicSession->branch_id)
+                ->limit(1);
+        })
+        ->orderByDesc('created_at')
+        ->orderByDesc('id')
+        ->take(5)
+        ->get();
+
+    /*
+     * A student session may have many results, so also load results
+     * belonging to every registration in the selected session.
+     */
+    $recentResults = Result::with([
+        'student.classInfo',
+        'student.branch',
+    ])
+        ->where('branch_id', $selectedBranchId)
+        ->whereIn(
+            'student_session_id',
+            StudentSession::query()
+                ->where('academic_session_id', $academicSession->id)
+                ->where('branch_id', $selectedBranchId)
+                ->select('id')
+        )
+        ->orderByDesc('created_at')
+        ->orderByDesc('id')
+        ->take(5)
+        ->get();
+
+    foreach ($recentResults as $result) {
+        if (!$result->student || !$result->created_at) {
+            continue;
+        }
+
+        $resultDate = \Carbon\Carbon::parse($result->created_at);
+
+        $studentName = $result->student->full_name;
+
+        $className = optional($result->student->classInfo)->name
+            ?? optional($result->student->classInfo)->class_name
+            ?? 'Class';
+
+        $examType = $result->exam_type ?: 'Examination';
+
+        $notificationTime = $resultDate->isToday()
+            ? 'Today'
+            : ($resultDate->isYesterday()
+                ? 'Yesterday'
+                : $resultDate->diffForHumans());
+
+        $notifications->push([
+            'title' => 'Recent Published Result',
+            'text' => $studentName
+                . "'s " . $className . ' '
+                . $examType
+                . ' result has been published.',
+            'time' => $notificationTime,
+            'type' => 'green',
+            'icon' => '🏆',
+            'date' => $resultDate->toDateString(),
+            'student_id' => $result->student_id,
+            'result_id' => $result->id,
+            'branch_id' => $result->branch_id,
+        ]);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Notifications: Examinations
+    |--------------------------------------------------------------------------
+    */
+    $examinations = Examination::query()
+        ->where('branch_id', $selectedBranchId)
+        ->orderByDesc('created_at')
+        ->orderByDesc('id')
+        ->take(5)
+        ->get();
+
+    foreach ($examinations as $examination) {
+        if (!$examination->created_at) {
+            continue;
+        }
+
+        $examDate = \Carbon\Carbon::parse(
+            $examination->created_at
+        );
+
+        $examType = $examination->examination_type
+            ?: 'Examination';
+
+        $examYear = $examination->examination_year ?: '';
+
+        $notificationTime = $examDate->isToday()
+            ? 'Today'
+            : ($examDate->isYesterday()
+                ? 'Yesterday'
+                : $examDate->diffForHumans());
+
+        $notifications->push([
+            'title' => 'Upcoming Examination',
+            'text' => $examType . ' examination '
+                . ($examYear ? 'for ' . $examYear . ' ' : '')
+                . 'has been scheduled.',
+            'time' => $notificationTime,
+            'type' => 'orange',
+            'icon' => '📝',
+            'date' => $examDate->toDateString(),
+            'examination_id' => $examination->id,
+            'branch_id' => $examination->branch_id,
+        ]);
+    }
+
+    $notifications = $notifications
+        ->sortByDesc('date')
+        ->values()
+        ->take(5);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Response
+    |--------------------------------------------------------------------------
+    */
+    return response()->json([
+        'status' => true,
+
+        'academic_session' => [
+            'id' => $academicSession->id,
+            'name' => $academicSession->name,
+            'is_active' => (bool) $academicSession->is_active,
+            'branch_id' => $academicSession->branch_id,
+        ],
+
+        'total_staff' => $staffQuery->count(),
+        'total_students' => $totalStudents,
+        'total_teachers' => $teacherQuery->count(),
+        'total_branches' => $totalBranches,
+
+        'recent_staff' => $recentStaff,
+        'notifications' => $notifications,
+
+        'user' => [
+            'id' => $authUser->id,
+            'name' => $authUser->name,
+            'role' => $authUser->role,
+            'branch_id' => $authUser->branch_id,
+            'designation' => $authUser->skill ?? $authUser->role,
+            'image' => $authUser->image
+                ? asset('storage/' . $authUser->image)
+                : null,
+        ],
+    ]);
+}
 
     /**
      * --------------------------------------------------------------------------
      * DASHBOARD ATTENDANCE TREND
      * --------------------------------------------------------------------------
      */
-    public function attendanceTrend(Request $request)
-    {
-        $authUser = $this->authUser($request);
 
-        if (!$authUser) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Unauthenticated.',
-            ], 401);
+public function attendanceTrend(Request $request)
+{
+    $authUser = $this->authUser($request);
+
+    if (!$authUser) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Unauthenticated.',
+        ], 401);
+    }
+
+    if (!in_array($authUser->role, [
+        'Manager',
+        'Branch Manager',
+        'Admin',
+        'Branch Admin',
+    ])) {
+        return $this->forbidden(
+            'You are not authorized to access attendance trend.'
+        );
+    }
+
+    if (
+        $authUser->role !== 'Manager'
+        && !$authUser->branch_id
+    ) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Your account is not assigned to any branch.',
+        ], 403);
+    }
+
+    $request->validate([
+        'date' => 'nullable|date',
+        'academic_session_id' => [
+            'nullable',
+            'integer',
+            'exists:academic_sessions,id',
+        ],
+    ]);
+
+    $selectedDate = $request->input(
+        'date',
+        now()->toDateString()
+    );
+
+    /*
+    |--------------------------------------------------------------------------
+    | Resolve Branch
+    |--------------------------------------------------------------------------
+    */
+    $selectedBranchId = null;
+
+    if ($authUser->role === 'Manager') {
+        $headerBranchId = $request->header('X-Branch-Id');
+
+        if ($headerBranchId !== null && $headerBranchId !== '') {
+            $selectedBranch = Branch::find($headerBranchId);
+
+            if (!$selectedBranch) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Selected branch not found.',
+                ], 404);
+            }
+
+            $selectedBranchId = (int) $selectedBranch->id;
         }
+    } else {
+        $selectedBranchId = (int) $authUser->branch_id;
+    }
 
-        if (!in_array($authUser->role, [
-            'Manager',
-            'Branch Manager',
-            'Admin',
-            'Branch Admin',
-        ])) {
-            return $this->forbidden(
-                'You are not authorized to access attendance trend.'
-            );
-        }
+    /*
+    |--------------------------------------------------------------------------
+    | Resolve Academic Session
+    |--------------------------------------------------------------------------
+    */
+    $sessionQuery = AcademicSession::query();
 
-        if (
-            $authUser->role !== 'Manager'
-            && !$authUser->branch_id
-        ) {
+    if ($selectedBranchId !== null) {
+        $sessionQuery->where('branch_id', $selectedBranchId);
+    }
+
+    if ($request->filled('academic_session_id')) {
+        $academicSession = (clone $sessionQuery)
+            ->where('id', $request->integer('academic_session_id'))
+            ->first();
+
+        if (!$academicSession) {
             return response()->json([
                 'status' => false,
                 'message' =>
-                    'Your account is not assigned to any branch.',
+                    'The selected academic session does not belong to your selected branch.',
             ], 403);
         }
+    } else {
+        $academicSession = (clone $sessionQuery)
+            ->where('is_active', true)
+            ->orderByDesc('id')
+            ->first();
+    }
 
-        $request->validate([
-            'date' => 'nullable|date',
-        ]);
+    if (!$academicSession) {
+        return response()->json([
+            'status' => false,
+            'message' =>
+                'No active academic session was found. Please select an academic session.',
+        ], 422);
+    }
 
-        $selectedDate = $request->input(
-            'date',
-            now()->toDateString()
+    $selectedBranchId = (int) $academicSession->branch_id;
+
+    /*
+    |--------------------------------------------------------------------------
+    | Date Range: Seven Days
+    |--------------------------------------------------------------------------
+    */
+    $endDate = \Carbon\Carbon::parse($selectedDate)->startOfDay();
+    $startDate = $endDate->copy()->subDays(6);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Students Registered in Selected Session
+    |--------------------------------------------------------------------------
+    */
+    $studentSessionIds = StudentSession::query()
+        ->where('academic_session_id', $academicSession->id)
+        ->where('branch_id', $selectedBranchId)
+        ->select('id');
+
+    $totalStudents = StudentSession::query()
+        ->where('academic_session_id', $academicSession->id)
+        ->where('branch_id', $selectedBranchId)
+        ->count();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Attendance Records for Selected Session Only
+    |--------------------------------------------------------------------------
+    */
+    $attendanceQuery = StudentAttendance::query()
+        ->whereBetween('date', [
+            $startDate->toDateString(),
+            $endDate->toDateString(),
+        ])
+        ->whereIn('student_session_id', $studentSessionIds);
+
+    $attendanceRecords = $attendanceQuery->get([
+        'date',
+        'status',
+        'student_session_id',
+    ]);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Build Seven-Day Trend
+    |--------------------------------------------------------------------------
+    */
+    $trend = [];
+
+    for ($i = 0; $i < 7; $i++) {
+        $date = $startDate->copy()->addDays($i);
+        $dateString = $date->toDateString();
+
+        $dayRecords = $attendanceRecords->filter(
+            function ($record) use ($dateString) {
+                return \Carbon\Carbon::parse($record->date)
+                    ->toDateString() === $dateString;
+            }
         );
 
-        /**
-         * ----------------------------------------------------------------------
-         * Branch Selection
-         * ----------------------------------------------------------------------
-         */
-        $selectedBranchId = null;
+        $present = $dayRecords
+            ->where('status', 'present')
+            ->count();
 
-        if ($authUser->role === 'Manager') {
-            $selectedBranchId =
-                $request->header('X-Branch-Id');
+        $absent = $dayRecords
+            ->where('status', 'absent')
+            ->count();
 
-            if (
-                $selectedBranchId !== null
-                && $selectedBranchId !== ''
-            ) {
-                $selectedBranch =
-                    Branch::find($selectedBranchId);
+        $late = $dayRecords
+            ->where('status', 'late')
+            ->count();
 
-                if (!$selectedBranch) {
-                    return response()->json([
-                        'status' => false,
-                        'message' =>
-                            'Selected branch not found.',
-                    ], 404);
-                }
-            }
-        } else {
-            $selectedBranchId =
-                $authUser->branch_id;
-        }
+        $leave = $dayRecords
+            ->where('status', 'leave')
+            ->count();
 
-        /**
-         * ----------------------------------------------------------------------
-         * 7 Days Date Range
-         * ----------------------------------------------------------------------
-         *
-         * Selected date will be the last point.
-         * Previous 6 days will be included.
-         *
-         * ----------------------------------------------------------------------
-         */
-        $endDate =
-            \Carbon\Carbon::parse($selectedDate)
-                ->startOfDay();
+        $attendanceTotal = $present + $absent + $late + $leave;
 
-        $startDate =
-            $endDate->copy()->subDays(6);
+        $presentPercentage = $totalStudents > 0
+            ? round(($present / $totalStudents) * 100, 2)
+            : 0;
 
-        /**
-         * ----------------------------------------------------------------------
-         * Total Students
-         * ----------------------------------------------------------------------
-         */
-        $studentQuery = Student::query();
+        $absentPercentage = $totalStudents > 0
+            ? round(($absent / $totalStudents) * 100, 2)
+            : 0;
 
-        if (
-            $selectedBranchId !== null
-            && $selectedBranchId !== ''
-        ) {
-            $studentQuery->where(
-                'branch_id',
-                $selectedBranchId
-            );
-        }
+        $latePercentage = $totalStudents > 0
+            ? round(($late / $totalStudents) * 100, 2)
+            : 0;
 
-        $totalStudents =
-            $studentQuery->count();
+        $leavePercentage = $totalStudents > 0
+            ? round(($leave / $totalStudents) * 100, 2)
+            : 0;
 
-        /**
-         * ----------------------------------------------------------------------
-         * Attendance Query
-         * ----------------------------------------------------------------------
-         */
-        $attendanceQuery =
-            StudentAttendance::query()
-                ->whereBetween('date', [
-                    $startDate->toDateString(),
-                    $endDate->toDateString(),
-                ]);
+        $averageStatus = $totalStudents > 0
+            ? round(($attendanceTotal / $totalStudents) * 100, 2)
+            : 0;
 
-        if (
-            $selectedBranchId !== null
-            && $selectedBranchId !== ''
-        ) {
-            $attendanceQuery->where(
-                'branch_id',
-                $selectedBranchId
-            );
-        }
-
-        $attendanceRecords =
-            $attendanceQuery->get([
-                'date',
-                'status',
-            ]);
-
-        /**
-         * ----------------------------------------------------------------------
-         * Prepare 7 Days
-         * ----------------------------------------------------------------------
-         */
-        $trend = [];
-
-        for ($i = 0; $i < 7; $i++) {
-            $date =
-                $startDate->copy()->addDays($i);
-
-            $dateString =
-                $date->toDateString();
-
-            $dayRecords =
-                $attendanceRecords->filter(
-                    function ($record) use ($dateString) {
-                        return $record->date->toDateString()
-                            === $dateString;
-                    }
-                );
-
-            $present =
-                $dayRecords
-                    ->where('status', 'present')
-                    ->count();
-
-            $absent =
-                $dayRecords
-                    ->where('status', 'absent')
-                    ->count();
-
-            $late =
-                $dayRecords
-                    ->where('status', 'late')
-                    ->count();
-
-            $leave =
-                $dayRecords
-                    ->where('status', 'leave')
-                    ->count();
-
-            $attendanceTotal =
-                $present +
-                $absent +
-                $late +
-                $leave;
-
-            $presentPercentage =
-                $totalStudents > 0
-                    ? round(
-                        ($present / $totalStudents) * 100,
-                        2
-                    )
-                    : 0;
-
-            $absentPercentage =
-                $totalStudents > 0
-                    ? round(
-                        ($absent / $totalStudents) * 100,
-                        2
-                    )
-                    : 0;
-
-            $latePercentage =
-                $totalStudents > 0
-                    ? round(
-                        ($late / $totalStudents) * 100,
-                        2
-                    )
-                    : 0;
-
-            $leavePercentage =
-                $totalStudents > 0
-                    ? round(
-                        ($leave / $totalStudents) * 100,
-                        2
-                    )
-                    : 0;
-
-            $averageStatus =
-                $totalStudents > 0
-                    ? round(
-                        ($attendanceTotal / $totalStudents) * 100,
-                        2
-                    )
-                    : 0;
-
-            $trend[] = [
-                'date' =>
-                    $dateString,
-                'day' =>
-                    $date->format('D'),
-                'day_number' =>
-                    $date->format('d'),
-                'present' =>
-                    $present,
-                'absent' =>
-                    $absent,
-                'late' =>
-                    $late,
-                'leave' =>
-                    $leave,
-                'present_percentage' =>
-                    $presentPercentage,
-                'absent_percentage' =>
-                    $absentPercentage,
-                'late_percentage' =>
-                    $latePercentage,
-                'leave_percentage' =>
-                    $leavePercentage,
-                'average_status' =>
-                    $averageStatus,
-            ];
-        }
-
-        /**
-         * ----------------------------------------------------------------------
-         * Selected Date Summary
-         * ----------------------------------------------------------------------
-         */
-        $selectedDay = collect($trend)
-            ->firstWhere('date', $selectedDate);
-
-        /**
-         * ----------------------------------------------------------------------
-         * Response
-         * ----------------------------------------------------------------------
-         */
-        return response()->json([
-            'status' => true,
-            'date' =>
-                $selectedDate,
-            'total_students' =>
-                $totalStudents,
-            'present' =>
-                $selectedDay['present'] ?? 0,
-            'absent' =>
-                $selectedDay['absent'] ?? 0,
-            'late' =>
-                $selectedDay['late'] ?? 0,
-            'leave' =>
-                $selectedDay['leave'] ?? 0,
-            'present_percentage' =>
-                $selectedDay['present_percentage'] ?? 0,
-            'absent_percentage' =>
-                $selectedDay['absent_percentage'] ?? 0,
-            'late_percentage' =>
-                $selectedDay['late_percentage'] ?? 0,
-            'leave_percentage' =>
-                $selectedDay['leave_percentage'] ?? 0,
-            'average_status' =>
-                $selectedDay['average_status'] ?? 0,
-            'trend' =>
-                $trend,
-        ]);
+        $trend[] = [
+            'date' => $dateString,
+            'day' => $date->format('D'),
+            'day_number' => $date->format('d'),
+            'present' => $present,
+            'absent' => $absent,
+            'late' => $late,
+            'leave' => $leave,
+            'present_percentage' => $presentPercentage,
+            'absent_percentage' => $absentPercentage,
+            'late_percentage' => $latePercentage,
+            'leave_percentage' => $leavePercentage,
+            'average_status' => $averageStatus,
+        ];
     }
+
+    $selectedDay = collect($trend)
+        ->firstWhere('date', $selectedDate);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Response
+    |--------------------------------------------------------------------------
+    */
+    return response()->json([
+        'status' => true,
+
+        'academic_session' => [
+            'id' => $academicSession->id,
+            'name' => $academicSession->name,
+            'is_active' => (bool) $academicSession->is_active,
+            'branch_id' => $academicSession->branch_id,
+        ],
+
+        'date' => $selectedDate,
+        'total_students' => $totalStudents,
+
+        'present' => $selectedDay['present'] ?? 0,
+        'absent' => $selectedDay['absent'] ?? 0,
+        'late' => $selectedDay['late'] ?? 0,
+        'leave' => $selectedDay['leave'] ?? 0,
+
+        'present_percentage' => $selectedDay['present_percentage'] ?? 0,
+        'absent_percentage' => $selectedDay['absent_percentage'] ?? 0,
+        'late_percentage' => $selectedDay['late_percentage'] ?? 0,
+        'leave_percentage' => $selectedDay['leave_percentage'] ?? 0,
+        'average_status' => $selectedDay['average_status'] ?? 0,
+
+        'trend' => $trend,
+    ]);
+}
 
     /**
      * --------------------------------------------------------------------------

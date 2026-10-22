@@ -221,11 +221,12 @@ class StudentController extends Controller
             $query->where('branch_id', $currentBranchId);
         }
 
-        if ($search !== '') {
+       if ($search !== '') {
             $query->where(function ($q) use ($search) {
                 $q->where('full_name', 'like', '%' . $search . '%')
                     ->orWhere('email', 'like', '%' . $search . '%')
-                    ->orWhere('student_id', 'like', '%' . $search . '%');
+                    ->orWhere('student_id', 'like', '%' . $search . '%')
+                    ->orWhere('student_roll', 'like', '%' . $search . '%');
             });
         }
 
@@ -431,6 +432,8 @@ class StudentController extends Controller
             'fathers_name' => 'required|string|max:255',
             'mothers_name' => 'required|string|max:255',
             'phone' => 'required|string|max:20',
+            'second_phone' => 'nullable|string|max:20',
+            'student_roll' => 'nullable|string|max:50',
             'academic_session_id' => 'required|integer|exists:academic_sessions,id',
             'section_id' => 'required|integer|exists:sections,id',
             'class_id' => 'required|integer|exists:clss_m_s,id',
@@ -519,6 +522,8 @@ class StudentController extends Controller
                     'mothers_name' => $request->mothers_name,
                     'student_id' => $studentId,
                     'phone' => $request->phone,
+                    'second_phone' => $request->second_phone,
+                    'student_roll' => $request->student_roll,
                     'section_id' => $request->section_id,
                     'class_id' => $request->class_id,
                     'class_group_id' => $request->class_group_id,
@@ -621,214 +626,228 @@ class StudentController extends Controller
         return $this->show($request, $student);
     }
 
-    /**
-     * Update student personal data and selected session enrollment.
-     *
-     * Editing an older session must not overwrite the student's
-     * latest class, section, shift, group, or monthly fee.
-     */
-    public function update(Request $request, Student $student)
-    {
-        $authUser = $request->user();
 
-        if (!$authUser) {
-            return $this->unauthenticated();
-        }
+/**
+ * Update student personal data and selected session enrollment.
+ *
+ * Editing an older session must not overwrite the student's
+ * latest class, section, shift, group, or monthly fee.
+ */
+public function update(Request $request, Student $student)
+{
+    $authUser = $request->user();
 
-        if (!$this->canAccessStudent($authUser, $student)) {
-            return $this->forbidden('You cannot update this student.');
-        }
+    if (!$authUser) {
+        return $this->unauthenticated();
+    }
 
-        $request->validate([
-            'full_name' => 'required|string|max:255',
-            'version' => 'required|string|max:50',
-            'phone' => 'required|string|max:20',
-            'academic_session_id' => 'required|integer|exists:academic_sessions,id',
-            'section_id' => 'required|integer|exists:sections,id',
-            'class_id' => 'required|integer|exists:clss_m_s,id',
-            'class_group_id' => 'required|integer|exists:class_groups,id',
-            'shift_id' => 'required|integer|exists:shifts,id',
-            'course_name' => 'nullable|string|max:100',
-            'admission_date' => 'required|date',
-            'email' => [
-                'required',
-                'email',
-                Rule::unique('students', 'email')->ignore($student->id),
-            ],
-            'image' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
-            'monthly_fee' => 'nullable|numeric|min:0',
-        ]);
+    if (!$this->canAccessStudent($authUser, $student)) {
+        return $this->forbidden('You cannot update this student.');
+    }
 
-        $branchId = $student->branch_id;
+    // Validate student and selected academic-session data.
+    $request->validate([
+        'full_name' => 'required|string|max:255',
+        'version' => 'required|string|max:50',
+        'phone' => 'required|string|max:20',
+        'student_roll' => 'nullable|string|max:50',
+        'second_phone' => 'nullable|string|max:20',
 
-        if (!$branchId) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Student is not assigned to any branch.',
-            ], 422);
-        }
+        'academic_session_id' => 'required|integer|exists:academic_sessions,id',
+        'section_id' => 'required|integer|exists:sections,id',
+        'class_id' => 'required|integer|exists:clss_m_s,id',
+        'class_group_id' => 'required|integer|exists:class_groups,id',
+        'shift_id' => 'required|integer|exists:shifts,id',
 
-        $academicSession = $this->getAcademicSessionForBranch(
-            $request->academic_session_id,
-            $branchId
+        'course_name' => 'nullable|string|max:100',
+        'admission_date' => 'required|date',
+
+        'email' => [
+            'required',
+            'email',
+            Rule::unique('students', 'email')->ignore($student->id),
+        ],
+
+        'image' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+        'monthly_fee' => 'nullable|numeric|min:0',
+    ]);
+
+    $branchId = $student->branch_id;
+
+    if (!$branchId) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Student is not assigned to any branch.',
+        ], 422);
+    }
+
+    // Ensure the selected academic session belongs to the student's branch.
+    $academicSession = $this->getAcademicSessionForBranch(
+        $request->academic_session_id,
+        $branchId
+    );
+
+    if (!$academicSession) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Selected academic session does not belong to this student branch.',
+        ], 422);
+    }
+
+    // Validate class, section, group, and shift branch ownership.
+    $academicError = $this->validateAcademicDetails(
+        $request,
+        $branchId
+    );
+
+    if ($academicError) {
+        return $academicError;
+    }
+
+    $oldImagePath = $student->image;
+    $imagePath = $oldImagePath;
+
+    if ($request->hasFile('image')) {
+        $file = $request->file('image');
+
+        $filename = time() . '_' . Str::random(10) . '.' .
+            $file->getClientOriginalExtension();
+
+        $imagePath = $file->storeAs(
+            'students',
+            $filename,
+            'public'
         );
+    }
 
-        if (!$academicSession) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Selected academic session does not belong to this student branch.',
-            ], 422);
-        }
-
-        $academicError = $this->validateAcademicDetails(
+    try {
+        DB::transaction(function () use (
             $request,
-            $branchId
-        );
-
-        if ($academicError) {
-            return $academicError;
-        }
-
-        $oldImagePath = $student->image;
-        $imagePath = $oldImagePath;
-
-        if ($request->hasFile('image')) {
-            $file = $request->file('image');
-
-            $filename = time() . '_' . Str::random(10) . '.' .
-                $file->getClientOriginalExtension();
-
-            $imagePath = $file->storeAs(
-                'students',
-                $filename,
-                'public'
-            );
-        }
-
-        try {
-            DB::transaction(function () use (
-                $request,
-                $student,
-                $branchId,
-                $academicSession,
-                $imagePath
-            ) {
-                $enrollment = StudentSession::where(
-                    'student_id',
-                    $student->id
+            $student,
+            $branchId,
+            $academicSession,
+            $imagePath
+        ) {
+            // Find the enrollment for the selected academic session.
+            $enrollment = StudentSession::where(
+                'student_id',
+                $student->id
+            )
+                ->where(
+                    'academic_session_id',
+                    $academicSession->id
                 )
-                    ->where(
-                        'academic_session_id',
-                        $academicSession->id
-                    )
-                    ->lockForUpdate()
-                    ->first();
+                ->lockForUpdate()
+                ->first();
 
-                /*
-                 * Preserve the current project's latest-session rule.
-                 */
-                $latestSessionId = StudentSession::where(
-                    'student_id',
-                    $student->id
-                )->max('academic_session_id');
+            // Preserve the existing latest-session rule.
+            $latestSessionId = StudentSession::where(
+                'student_id',
+                $student->id
+            )->max('academic_session_id');
 
-                $isLatestSession = $latestSessionId === null
-                    || (int) $academicSession->id >= (int) $latestSessionId;
+            $isLatestSession = $latestSessionId === null
+                || (int) $academicSession->id >= (int) $latestSessionId;
 
-                $monthlyFee = $request->monthly_fee
-                    ?? (
-                        $enrollment?->monthly_fee
-                        ?? $student->monthly_fee
-                        ?? 0
-                    );
+            $monthlyFee = $request->monthly_fee
+                ?? (
+                    $enrollment?->monthly_fee
+                    ?? $student->monthly_fee
+                    ?? 0
+                );
 
-                /*
-                 * Update personal information for every session edit.
-                 */
-                $studentData = [
-                    'full_name' => $request->full_name,
-                    'version' => $request->version,
-                    'phone' => $request->phone,
-                    'course_name' => $request->course_name,
-                    'admission_date' => $request->admission_date,
-                    'email' => $request->email,
-                    'image' => $imagePath,
-                ];
+            /*
+             * Update student personal information.
+             * Roll and second phone are included here.
+             */
+            $studentData = [
+                'full_name' => $request->full_name,
+                'version' => $request->version,
+                'phone' => $request->phone,
+                'student_roll' => $request->student_roll,
+                'second_phone' => $request->second_phone,
+                'course_name' => $request->course_name,
+                'admission_date' => $request->admission_date,
+                'email' => $request->email,
+                'image' => $imagePath,
+            ];
 
-                /*
-                 * Only the latest enrollment updates legacy current-class fields.
-                 */
-                if ($isLatestSession) {
-                    $studentData['section_id'] = $request->section_id;
-                    $studentData['class_id'] = $request->class_id;
-                    $studentData['class_group_id'] = $request->class_group_id;
-                    $studentData['shift_id'] = $request->shift_id;
-                    $studentData['monthly_fee'] = $monthlyFee;
-                }
-
-                $student->update($studentData);
-
-                /*
-                 * Update the selected session only, or create its enrollment.
-                 */
-                $enrollmentData = [
-                    'student_id' => $student->id,
-                    'academic_session_id' => $academicSession->id,
-                    'branch_id' => $branchId,
-                    'class_id' => $request->class_id,
-                    'section_id' => $request->section_id,
-                    'shift_id' => $request->shift_id,
-                    'class_group_id' => $request->class_group_id,
-                    'monthly_fee' => $monthlyFee,
-                ];
-
-                if ($enrollment) {
-                    $enrollment->update($enrollmentData);
-                } else {
-                    $enrollmentData['status'] = 'active';
-
-                    StudentSession::create($enrollmentData);
-                }
-            });
-        } catch (\Throwable $e) {
-            if (
-                $request->hasFile('image') &&
-                $imagePath &&
-                $imagePath !== $oldImagePath &&
-                Storage::disk('public')->exists($imagePath)
-            ) {
-                Storage::disk('public')->delete($imagePath);
+            /*
+             * Only update the legacy current-class fields when
+             * the selected enrollment is the latest session.
+             */
+            if ($isLatestSession) {
+                $studentData['section_id'] = $request->section_id;
+                $studentData['class_id'] = $request->class_id;
+                $studentData['class_group_id'] = $request->class_group_id;
+                $studentData['shift_id'] = $request->shift_id;
+                $studentData['monthly_fee'] = $monthlyFee;
             }
 
-            throw $e;
-        }
+            $student->update($studentData);
 
-        /*
-         * Delete the previous image only after successful database update.
-         */
+            /*
+             * Update the selected session enrollment.
+             * If it does not exist, create it.
+             */
+            $enrollmentData = [
+                'student_id' => $student->id,
+                'academic_session_id' => $academicSession->id,
+                'branch_id' => $branchId,
+                'class_id' => $request->class_id,
+                'section_id' => $request->section_id,
+                'shift_id' => $request->shift_id,
+                'class_group_id' => $request->class_group_id,
+                'monthly_fee' => $monthlyFee,
+            ];
+
+            if ($enrollment) {
+                $enrollment->update($enrollmentData);
+            } else {
+                $enrollmentData['status'] = 'active';
+
+                StudentSession::create($enrollmentData);
+            }
+        });
+    } catch (\Throwable $e) {
+        // Delete the newly uploaded image if the database update fails.
         if (
             $request->hasFile('image') &&
-            $oldImagePath &&
-            $oldImagePath !== $imagePath &&
-            Storage::disk('public')->exists($oldImagePath)
+            $imagePath &&
+            $imagePath !== $oldImagePath &&
+            Storage::disk('public')->exists($imagePath)
         ) {
-            Storage::disk('public')->delete($oldImagePath);
+            Storage::disk('public')->delete($imagePath);
         }
 
-        $student->refresh();
-
-        return response()->json([
-            'status' => true,
-            'message' => 'Student Updated Successfully',
-            'student' => $student->load([
-                'section',
-                'classInfo',
-                'classGroup',
-                'shift',
-                'branch',
-            ]),
-        ]);
+        throw $e;
     }
+
+    // Delete the previous image only after a successful update.
+    if (
+        $request->hasFile('image') &&
+        $oldImagePath &&
+        $oldImagePath !== $imagePath &&
+        Storage::disk('public')->exists($oldImagePath)
+    ) {
+        Storage::disk('public')->delete($oldImagePath);
+    }
+
+    $student->refresh();
+
+    return response()->json([
+        'status' => true,
+        'message' => 'Student Updated Successfully',
+        'student' => $student->load([
+            'section',
+            'classInfo',
+            'classGroup',
+            'shift',
+            'branch',
+        ]),
+    ]);
+}
+
 
     /**
      * Delete student, payments, and session enrollments.

@@ -1,3 +1,4 @@
+
 <?php
 
 use Illuminate\Http\Request;
@@ -29,6 +30,7 @@ use App\Http\Controllers\GradingSystemController;
 use App\Http\Middleware\PaymentAccessMiddleware;
 use App\Http\Controllers\AcademicSessionController;
 use App\Http\Controllers\StudentSessionController;
+use App\Http\Controllers\SmsController;
 
 Route::post('/login', [StafftController::class, 'login']);
 
@@ -58,35 +60,20 @@ Route::middleware([
     |--------------------------------------------------------------------------
     */
 
-    Route::get(
-        '/staff',
-        [StafftController::class, 'index']
-    );
+    Route::get('/staff', [StafftController::class, 'index']);
 
     Route::get(
         '/staff/dashboard',
         [StafftController::class, 'dashboard']
     );
 
-    Route::get(
-        '/staff/{id}',
-        [StafftController::class, 'show']
-    );
+    Route::get('/staff/{id}', [StafftController::class, 'show']);
 
-    Route::post(
-        '/staff',
-        [StafftController::class, 'store']
-    );
+    Route::post('/staff', [StafftController::class, 'store']);
 
-    Route::put(
-        '/staff/{id}',
-        [StafftController::class, 'update']
-    );
+    Route::put('/staff/{id}', [StafftController::class, 'update']);
 
-    Route::delete(
-        '/staff/{id}',
-        [StafftController::class, 'destroy']
-    );
+    Route::delete('/staff/{id}', [StafftController::class, 'destroy']);
 
     Route::get(
         '/staff/dashboard/attendance-trend',
@@ -105,10 +92,7 @@ Route::middleware([
     |--------------------------------------------------------------------------
     */
 
-    Route::apiResource(
-        'students',
-        StudentController::class
-    );
+    Route::apiResource('students', StudentController::class);
 
 
     /*
@@ -117,18 +101,21 @@ Route::middleware([
     |--------------------------------------------------------------------------
     */
 
-         Route::get(
+    Route::get(
         '/student-attendance/monthly-summary',
         [StudentAttendanceController::class, 'monthlySummary']
-         );
-         Route::get(
+    );
+
+    Route::get(
         '/student-attendance/yearly-summary',
         [StudentAttendanceController::class, 'yearlySummary']
-        );
-        Route::post(
+    );
+
+    Route::post(
         '/student-attendance/scan',
         [StudentAttendanceController::class, 'scan']
-        );
+    );
+
     Route::get(
         '/student-attendance',
         [StudentAttendanceController::class, 'index']
@@ -157,14 +144,42 @@ Route::middleware([
 
     /*
     |--------------------------------------------------------------------------
+    | SMS DATA
+    |--------------------------------------------------------------------------
+    | All routes use the existing auth:sanctum and branch.context middleware.
+    | These routes only fetch data; they do not send SMS.
+    */
+
+    Route::prefix('sms')->controller(SmsController::class)->group(function () {
+
+        // Academic sessions, classes, sections and shifts
+        Route::get('/options', 'options');
+
+        // Search an individual student
+        Route::get('/students/search', 'searchStudents');
+
+        // Students filtered by academic session and placement
+        Route::get('/students', 'students');
+
+        // Students filtered by attendance date and status
+        Route::get('/attendance', 'attendanceStudents');
+        // Student Due Reminder
+        Route::get('/due-reminders', 'dueReminders');
+        // SMS Gateway Balance
+        Route::get('/balance', 'gatewayBalance');
+
+        Route::post('/send', 'send');
+
+    });
+
+
+    /*
+    |--------------------------------------------------------------------------
     | TEACHERS
     |--------------------------------------------------------------------------
     */
 
-    Route::apiResource(
-        'teachers',
-        TeacherController::class
-    );
+    Route::apiResource('teachers', TeacherController::class);
 
 
     /*
@@ -237,35 +252,27 @@ Route::middleware([
     |--------------------------------------------------------------------------
     */
 
-    Route::apiResource(
-        'shifts',
-        ShiftController::class
-    );
+    Route::apiResource('shifts', ShiftController::class);
 
-    Route::apiResource(
-        'sections',
-        SectionController::class
-    );
+    Route::apiResource('sections', SectionController::class);
 
-    Route::apiResource(
-        'subjects',
-        SubjectController::class
-    );
+    Route::apiResource('subjects', SubjectController::class);
 
-    Route::apiResource(
-        'classes',
-        ClssMController::class
-    );
+    Route::apiResource('classes', ClssMController::class);
 
-    Route::apiResource(
-        'class-groups',
-        ClassGroupController::class
-    );
+    Route::apiResource('class-groups', ClassGroupController::class);
+
     Route::apiResource(
         'academic-sessions',
         AcademicSessionController::class
     );
-    // CLASS MIGRATION
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | CLASS MIGRATION
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         '/class-migration/options',
@@ -281,19 +288,46 @@ Route::middleware([
         '/class-migration/migrate',
         [StudentSessionController::class, 'migrate']
     );
-    Route::apiResource(
-        'examinations',
-        ExaminationController::class
+
+    Route::post(
+        '/student-migration/migrate',
+        [StudentSessionController::class, 'migrateSingle']
     );
 
-    Route::apiResource(
-        'results',
-        ResultController::class
+
+    /*
+    |--------------------------------------------------------------------------
+    | EXAMINATIONS
+    |--------------------------------------------------------------------------
+    */
+
+    Route::apiResource('examinations', ExaminationController::class);
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | RESULTS
+    |--------------------------------------------------------------------------
+    */
+
+    Route::get(
+        '/results/institute',
+        [ResultController::class, 'instituteResult']
     );
 
-    Route::apiResource(
-        'final-results',
-        FinalResultController::class
+    Route::apiResource('results', ResultController::class);
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | FINAL RESULTS
+    |--------------------------------------------------------------------------
+    | Specific routes must come before apiResource.
+    */
+
+    Route::get(
+        '/final-results/average-merit-list',
+        [FinalResultController::class, 'averageMeritList']
     );
 
     Route::get(
@@ -302,9 +336,18 @@ Route::middleware([
     );
 
     Route::apiResource(
-        'holidays',
-        HolidayController::class
+        'final-results',
+        FinalResultController::class
     );
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | HOLIDAYS
+    |--------------------------------------------------------------------------
+    */
+
+    Route::apiResource('holidays', HolidayController::class);
 
 
     /*
@@ -340,10 +383,7 @@ Route::middleware([
     |--------------------------------------------------------------------------
     */
 
-    Route::apiResource(
-        'branches',
-        BranchController::class
-    );
+    Route::apiResource('branches', BranchController::class);
 
 
     /*
@@ -352,13 +392,19 @@ Route::middleware([
     |--------------------------------------------------------------------------
     */
 
-    Route::middleware(
-        PaymentAccessMiddleware::class
-    )->group(function () {
+    Route::middleware(PaymentAccessMiddleware::class)->group(function () {
 
         Route::get(
             '/expense-staffs',
             [ExpenseController::class, 'getStaffs']
+        );
+
+
+        // PAYMENTS
+
+        Route::get(
+            '/payments/ledger',
+            [PaymentController::class, 'ledger']
         );
 
         Route::get(
@@ -380,6 +426,7 @@ Route::middleware([
             '/payments/{id}',
             [PaymentController::class, 'update']
         );
+
         Route::get(
             '/student-payment-register',
             [PaymentController::class, 'paymentRegister']
@@ -405,9 +452,35 @@ Route::middleware([
             [PdfController::class, 'downloadReceipt']
         );
 
+
+        // OTHER PAYMENTS
+        // Keep the specific ledger route before apiResource.
+
+        Route::get(
+            '/other-payments/ledger',
+            [OtherPaymentController::class, 'ledger']
+        );
+
         Route::apiResource(
             'other-payments',
             OtherPaymentController::class
+        );
+
+
+        // DUE PAYMENTS
+
+        Route::post(
+            '/due-payments',
+            [PaymentController::class, 'storeDuePayment']
+        );
+
+
+        // EXPENSES
+        // Keep the specific ledger route before apiResource.
+
+        Route::get(
+            '/expenses/ledger',
+            [ExpenseController::class, 'ledger']
         );
 
         Route::apiResource(
@@ -441,9 +514,10 @@ Route::middleware([
     */
 
     Route::post(
-    '/backup',
-    [BackupController::class, 'takeBackup']
+        '/backup',
+        [BackupController::class, 'takeBackup']
     );
+
 });
 
 
