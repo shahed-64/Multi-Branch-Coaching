@@ -160,6 +160,7 @@ public function index(Request $request)
         $request->validate([
             'name' => 'required|string|max:255',
             'start_time' => 'required',
+            'end_time' => 'required|date_format:H:i',
             'branch_id' => 'nullable|exists:branches,id',
         ]);
 
@@ -223,6 +224,7 @@ public function index(Request $request)
             $shift = Shift::create([
                 'name' => $request->name,
                 'start_time' => $request->start_time,
+                'end_time' => $request->end_time,
                 'branch_id' => $branchId,
             ]);
 
@@ -304,6 +306,7 @@ public function index(Request $request)
         $request->validate([
             'name' => 'required|string|max:255',
             'start_time' => 'required',
+            'end_time' => 'required|date_format:H:i',
         ]);
 
         try {
@@ -341,6 +344,7 @@ public function index(Request $request)
             $shift->update([
                 'name' => $request->name,
                 'start_time' => $request->start_time,
+                'end_time' => $request->end_time,
             ]);
 
             return response()->json([
